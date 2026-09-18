@@ -37,4 +37,4 @@ export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-$base_dir/cache/vllm}"
 mkdir -p "$VLLM_CACHE_ROOT"
 
 srun python "$python_script" \
-            --config "$base_dir/configs/roihu/generation_config.yaml"
+            --config "$base_dir/configs/roihu/generate_nemotron-cc.yaml"

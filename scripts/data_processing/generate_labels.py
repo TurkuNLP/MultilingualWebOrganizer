@@ -11,7 +11,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 
-from pydantic import (
+from pydantic import (  # type: ignore
     BaseModel,
     ConfigDict,
     Field,
@@ -25,12 +25,26 @@ from vllm.sampling_params import StructuredOutputsParams  # type: ignore
 from transformers.tokenization_utils_base import BatchEncoding  # type: ignore
 
 try:
-    from .prompts import get_topic_classification_prompt
+    from .prompts import (
+        get_english_topic_classification_prompt,
+        get_multilingual_topic_classification_prompt,
+    )
 except ImportError:
-    from prompts import get_topic_classification_prompt
+    from prompts import (
+        get_english_topic_classification_prompt,
+        get_multilingual_topic_classification_prompt,
+    )
 
 M = TypeVar("M", bound=BaseModel)
 LOGGER = logging.getLogger(__name__)
+
+
+def normalize_language(language: str) -> str:
+    """Normalize a language name to initial-capital form."""
+    normalized = language.strip().capitalize()
+    if not normalized:
+        raise ValueError("language must not be empty")
+    return normalized
 
 
 class InputDocument(BaseModel):
@@ -548,6 +562,8 @@ class ModelClient:
         batch_size: int = 32,
         max_tokens: int = 256,
         max_document_tokens: int = 8192,
+        max_documents: int | None = None,
+        language: str = "English",
     ) -> int:
         """Process validated documents, save results, and resume safely."""
         stable_ids = [label.id for label in labels]
@@ -557,19 +573,36 @@ class ModelClient:
             raise ValueError("examples must contain at least one demonstration")
         if max_document_tokens < 1:
             raise ValueError("max_document_tokens must be >= 1")
+        if max_documents is not None and max_documents < 1:
+            raise ValueError("max_documents must be >= 1")
+        language = normalize_language(language)
         store = JsonlResultStore(output_path, result_model, set(stable_ids))
         seen_input_ids: set[str] = set()
         processed = 0
+        stopped_early = False
 
         pending: list[tuple[int, InputDocument]] = []
         for line_number, document in documents:
+            if max_documents is not None and len(store.completed) >= max_documents:
+                LOGGER.info(
+                    "Reached max_documents=%d; stopping input processing",
+                    max_documents,
+                )
+                stopped_early = True
+                break
             if document.doc_id in seen_input_ids:
                 raise ValueError(f"Duplicate doc_id {document.doc_id!r} in input")
             seen_input_ids.add(document.doc_id)
             if document.doc_id in store.completed:
                 continue
             pending.append((line_number, document))
-            if len(pending) < batch_size:
+            remaining = (
+                max_documents - len(store.completed)
+                if max_documents is not None
+                else batch_size
+            )
+            target_batch_size = min(batch_size, remaining)
+            if len(pending) < target_batch_size:
                 continue
 
             batch_processed = self._process_batch(
@@ -580,6 +613,7 @@ class ModelClient:
                 result_model,
                 max_tokens,
                 max_document_tokens,
+                language,
             )
             processed += batch_processed
             LOGGER.info(
@@ -588,8 +622,15 @@ class ModelClient:
                 len(store.completed),
             )
             pending = []
+            if max_documents is not None and len(store.completed) >= max_documents:
+                LOGGER.info(
+                    "Reached max_documents=%d; stopping input processing",
+                    max_documents,
+                )
+                stopped_early = True
+                break
 
-        if pending:
+        if pending and (max_documents is None or len(store.completed) < max_documents):
             batch_processed = self._process_batch(
                 pending,
                 store,
@@ -598,6 +639,7 @@ class ModelClient:
                 result_model,
                 max_tokens,
                 max_document_tokens,
+                language,
             )
             processed += batch_processed
             LOGGER.info(
@@ -606,7 +648,7 @@ class ModelClient:
                 len(store.completed),
             )
         unknown_completed = store.completed - seen_input_ids
-        if unknown_completed:
+        if unknown_completed and not stopped_early:
             raise ValueError(
                 "Output contains doc_ids missing from input: "
                 f"{sorted(unknown_completed)[:5]!r}"
@@ -629,6 +671,8 @@ class ModelClient:
         batch_size: int = 32,
         max_tokens: int = 256,
         max_document_tokens: int = 8192,
+        max_documents: int | None = None,
+        language: str = "English",
     ) -> int:
         """Stream a local JSONL file, label it, save results, and resume."""
         if input_path.resolve() == output_path.resolve():
@@ -642,6 +686,8 @@ class ModelClient:
             batch_size=batch_size,
             max_tokens=max_tokens,
             max_document_tokens=max_document_tokens,
+            max_documents=max_documents,
+            language=language,
         )
 
     def run_dataset(
@@ -657,6 +703,8 @@ class ModelClient:
         batch_size: int = 32,
         max_tokens: int = 256,
         max_document_tokens: int = 8192,
+        max_documents: int | None = None,
+        language: str = "English",
     ) -> int:
         """Stream a HuggingFace dataset, label it, save results, and resume."""
         if not dataset_name.strip():
@@ -676,6 +724,8 @@ class ModelClient:
             batch_size=batch_size,
             max_tokens=max_tokens,
             max_document_tokens=max_document_tokens,
+            max_documents=max_documents,
+            language=language,
         )
 
     def _process_batch(
@@ -687,6 +737,7 @@ class ModelClient:
         result_model: type[M],
         max_tokens: int,
         max_document_tokens: int,
+        language: str,
     ) -> int:
         messages = []
         schemas = []
@@ -700,12 +751,21 @@ class ModelClient:
             label_text, example_text, temporary_to_stable = _format_prompt_resources(
                 labels, examples, prompt_seed
             )
-            prompt = get_topic_classification_prompt(
-                text=document_text,
-                url=str(url) if url else None,
-                labels=label_text,
-                examples=example_text,
-            )
+            if language == "English":
+                prompt = get_english_topic_classification_prompt(
+                    text=document_text,
+                    url=str(url) if url else None,
+                    labels=label_text,
+                    examples=example_text,
+                )
+            else:
+                prompt = get_multilingual_topic_classification_prompt(
+                    text=document_text,
+                    url=str(url) if url else None,
+                    labels=label_text,
+                    examples=example_text,
+                    language=language,
+                )
             messages.append(prompt)
             schemas.append(build_label_schema(result_model, list(temporary_to_stable)))
             mappings.append(temporary_to_stable)
@@ -751,6 +811,8 @@ def run_topic_jsonl(
     batch_size: int = 32,
     max_tokens: int = 256,
     max_document_tokens: int = 8192,
+    max_documents: int | None = None,
+    language: str = "English",
 ) -> int:
     """Run topic classification using YAML labels and demonstrations."""
     labels, examples = load_topic_resources(labels_path, examples_path)
@@ -762,6 +824,8 @@ def run_topic_jsonl(
         batch_size=batch_size,
         max_tokens=max_tokens,
         max_document_tokens=max_document_tokens,
+        max_documents=max_documents,
+        language=language,
     )
 
 
@@ -777,6 +841,8 @@ def run_topic_dataset(
     batch_size: int = 32,
     max_tokens: int = 256,
     max_document_tokens: int = 8192,
+    max_documents: int | None = None,
+    language: str = "English",
 ) -> int:
     """Run topic classification from a streamed HuggingFace dataset."""
     labels, examples = load_topic_resources(labels_path, examples_path)
@@ -790,6 +856,8 @@ def run_topic_dataset(
         batch_size=batch_size,
         max_tokens=max_tokens,
         max_document_tokens=max_document_tokens,
+        max_documents=max_documents,
+        language=language,
     )
 
 
@@ -823,6 +891,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--max-tokens", type=int)
     parser.add_argument("--max-document-tokens", type=int)
+    parser.add_argument("--max-documents", type=int)
+    parser.add_argument("--language")
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
@@ -861,7 +931,14 @@ def _load_cli_config(path: Path) -> dict[str, Any]:
             "seed",
             "thinking_mode",
         },
-        "run": {"batch_size", "max_tokens", "max_document_tokens", "log_level"},
+        "run": {
+            "batch_size",
+            "max_tokens",
+            "max_document_tokens",
+            "max_documents",
+            "language",
+            "log_level",
+        },
     }
     flattened: dict[str, Any] = {}
     destinations = {
@@ -883,6 +960,8 @@ def _load_cli_config(path: Path) -> dict[str, Any]:
         ("run", "batch_size"): "batch_size",
         ("run", "max_tokens"): "max_tokens",
         ("run", "max_document_tokens"): "max_document_tokens",
+        ("run", "max_documents"): "max_documents",
+        ("run", "language"): "language",
         ("run", "log_level"): "log_level",
     }
     for section, keys in section_keys.items():
@@ -909,7 +988,12 @@ def _load_cli_config(path: Path) -> dict[str, Any]:
     for name, value in flattened.items():
         if name == "base_dir":
             continue
-        if name in {"input_path", "output_path", "labels_path", "examples_path"}:
+        if name in {
+            "input_jsonl",
+            "output_path",
+            "labels_path",
+            "examples_path",
+        }:
             if not isinstance(value, str):
                 raise ValueError(f"Config path {name!r} must be a string")
             expanded = value.replace("${base_dir}", str(base_dir))
@@ -955,6 +1039,8 @@ def _merge_cli_and_config(
         "batch_size": 32,
         "max_tokens": 256,
         "max_document_tokens": 8192,
+        "max_documents": None,
+        "language": "English",
         "log_level": "INFO",
     }
     for name, value in defaults.items():
@@ -990,6 +1076,12 @@ def _merge_cli_and_config(
         parser.error(
             "--batch-size, --max-tokens, and --max-document-tokens must be >= 1"
         )
+    if args.max_documents is not None and args.max_documents < 1:
+        parser.error("--max-documents must be >= 1")
+    try:
+        args.language = normalize_language(args.language)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.max_model_len < 1 or args.tensor_parallel_size < 1:
         parser.error("--max-model-len and --tensor-parallel-size must be >= 1")
     if not 0.0 < args.gpu_memory_utilization <= 1.0:
@@ -1027,6 +1119,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "batch_size": args.batch_size,
         "max_tokens": args.max_tokens,
         "max_document_tokens": args.max_document_tokens,
+        "max_documents": args.max_documents,
+        "language": args.language,
     }
     if args.input_jsonl is not None:
         run_topic_jsonl(client, input_path=args.input_jsonl, **common_kwargs)
