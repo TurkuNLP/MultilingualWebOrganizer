@@ -1,0 +1,21 @@
+paths:
+  base_dir: /scratch/project_2020507/users/tarkkaot/MultilingualWebOrganizer
+  input_jsonl: ${base_dir}/data/FineWebSmallSample.jsonl
+  output: ${base_dir}/results/labels.jsonl
+  labels: ${base_dir}/scripts/data_processing/topics.yaml
+  examples: ${base_dir}/scripts/data_processing/topic_examples.yaml
+
+model:
+  name: Qwen/Qwen3.8-27B
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.9
+  dtype: auto
+  max_model_len: 32768
+  seed: 0
+  thinking_mode: disabled
+
+run:
+  batch_size: 64
+  max_tokens: 4096
+  max_document_tokens: 8192
+  log_level: INFO
