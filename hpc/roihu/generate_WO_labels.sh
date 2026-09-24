@@ -2,7 +2,7 @@
 #SBATCH --job-name=discover_topic_labels
 #SBATCH --account=project_2020507
 #SBATCH --partition=gpumedium
-#SBATCH --time=00:30:00
+#SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1 --cpus-per-task=144
 #SBATCH --gres=gpu:gh200:2
@@ -36,5 +36,7 @@ python_script="$base_dir/scripts/data_processing/generate_labels.py"
 export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-$base_dir/cache/vllm}"
 mkdir -p "$VLLM_CACHE_ROOT"
 
+lang="$1"
+
 srun python "$python_script" \
-            --config "$base_dir/configs/roihu/generate_nemotron-cc.yaml"
+            --config "$base_dir/configs/roihu/generate_${lang}_multisynt.yaml"
