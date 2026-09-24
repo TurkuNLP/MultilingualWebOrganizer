@@ -1,9 +1,9 @@
 paths:
   base_dir: /scratch/project_2020507/users/tarkkaot/MultilingualWebOrganizer
   input_dataset: MultiSynt/MT-Nemotron-CC
-  dataset_config: eng_Latn
-  dataset_split: parallel
-  output: ${base_dir}/results/nemotron-cc-parallel.jsonl
+  dataset_config: fin_Latn
+  dataset_split: tower72b_parallel
+  output: ${base_dir}/results/finnish-parallel.jsonl
   labels: ${base_dir}/scripts/data_processing/topics.yaml
   examples: ${base_dir}/scripts/data_processing/topic_examples.yaml
 
@@ -22,4 +22,4 @@ run:
   max_document_tokens: 8192
   log_level: INFO
   max_documents: 10000
-  language: English
+  language: finnish

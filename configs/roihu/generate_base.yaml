@@ -1,11 +1,7 @@
+# configs/roihu/generate_base.yaml
 paths:
   base_dir: /scratch/project_2020507/users/tarkkaot/MultilingualWebOrganizer
   input_dataset: MultiSynt/MT-Nemotron-CC
-  dataset_config: eng_Latn
-  dataset_split: parallel
-  output: ${base_dir}/results/nemotron-cc-parallel.jsonl
-  labels: ${base_dir}/scripts/data_processing/topics.yaml
-  examples: ${base_dir}/scripts/data_processing/topic_examples.yaml
 
 model:
   name: Qwen/Qwen3.8-27B
@@ -18,8 +14,7 @@ model:
 
 run:
   batch_size: 512
-  max_tokens: 8192 # max tokens to generate
+  max_tokens: 8192
   max_document_tokens: 8192
-  log_level: INFO
   max_documents: 10000
-  language: English
+  log_level: INFO
