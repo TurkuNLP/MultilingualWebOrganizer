@@ -1,119 +1,143 @@
-- id: L001
+- id: T001
   name: Adult Content
+  short_name: Adult
   definition: >
-    Content that is sexually explicit, pornographic, or otherwise intended for adults only. This includes nudity, sexual acts, and adult entertainment.
+    ""
 
-- id: L002
+- id: T002
   name: Art & Design
+  short_name: Art & Design
   definition: >
-    Content related to art, design, and creative expression. This includes visual arts, graphic design, architecture, and other forms of creative work.
+    Includes: architecture
 
-- id: L003
+- id: T003
   name: Software Development
+  short_name: Software Dev.
   definition: >
-    Content related to the development of software. This includes programming, algorithms, and web development.
+    Includes: algorithms, coding, and web development.
 
-- id: L004
+- id: T004
   name: Crime & Law
+  short_name: Crime & Law
   definition: >
-    Content related to crime and the legal system. This includes law enforcement, criminal justice, and legal proceedings.
+    Includes: law enforcement. For financial crime and litigation, prefer 'Finance & Business' instead. For social issues and the legislative process, prefer 'Politics & Social Issues' instead.
 
-- id: L005
+- id: T005
   name: Education & Jobs
+  short_name: Education & Jobs
   definition: >
-    Content related to education and employment. This includes pedagogy, training & certification, and academia.
+    Includes: pedagogy, training & certification, academia. If the page is educational about a specific topic, e.g. food or mathematics, prefer that topic instead.
 
-- id: L006
+- id: T006
   name: Electronics & Hardware
+  short_name: Hardware
   definition: >
-    Content related to electronics and hardware. This includes computer hardware, phones, televisions, and other consumer electronics.
+    Includes: computer hardware, phones, televisions, other consumer electronics.
 
-- id: L007
+- id: T007
   name: Entertainment
+  short_name: Entertainment
   definition: >
-    Content related to entertainment. This includes music, movies, TV shows, videos, celebrities, humor, and nightlife.
+    Includes: music, movies, TV shows, videos, celebrities, humor, nightlife. If the page discusses music or film as art rather than entertainment, prefer 'Art & Design' instead.
 
-- id: L008
+- id: T008
   name: Social Life
+  short_name: Social Life
   definition: >
-    Content related to different aspects of social life. This includes family, friends, relationships, and community.
+    Includes: family, friends, relationships, community. If the article focuses on a specific social activity (e.g. sports or board games), prefer the topic of the activity instead.
 
-- id: L009
+- id: T009
   name: Fashion & Beauty
+  short_name: Fashion & Beauty
   definition: >
-    Content related to fashion and beauty. This includes clothing, accessories, and cosmetics.
+    Includes: clothing, accessories, cosmetics.
 
-- id: L010
+- id: T010
   name: Finance & Business
+  short_name: Finance & Business
   definition: >
-    Content related to finance and business. This includes taxes, regulations, investments, insurance, credit cards, personal finance, corporate communication, marketing, and human resources.
+    Includes: taxes, regulations, investments, insurance, credit cards, personal finance, corporate communication, marketing, human resources.
 
-- id: L011
+- id: T011
   name: Food & Dining
+  short_name: Food & Dining
   definition: >
-    Content related to food and dining. This includes recipes, groceries, beverages, and restaurants.
+    Includes: recipes, groceries, beverages, restaurants. For nutritional science, prefer 'Health' instead.
 
-- id: L012
+- id: T012
   name: Games
+  short_name: Games
   definition: >
-    Content related to games and gaming. This includes video games, board games, and gambling.
+    Includes: video games, board games, gambling.
 
-- id: L013
+- id: T013
   name: Health
+  short_name: Health
   definition: >
-    Content related to health and wellness. This includes medicine, wellness, mental health, veterinary science, and nutritional science.
+    Includes: medicine, wellness, mental health, veterinary science, nutritional science. For health insurance, prefer 'Finance & Business' instead.
 
-- id: L014
+- id: T014
   name: History & Geography
+  short_name: History
   definition: >
-    Content related to history and geography. This includes historical events, geographical features, and cultural heritage.
+    Includes: archaeology.
 
-- id: L015
+- id: T015
   name: Home & Hobbies
+  short_name: Home & Hobbies
   definition: >
-    Content related to home and hobbies. This includes real estate, renting, relocation, furniture, appliances, home improvement, DIY, gardening, pets, toys, and collecting.
+    Includes: real estate, renting, relocation, furniture, appliances, home improvement, DIY, gardening, pets, toys, collecting.
 
-- id: L016
+- id: T016
   name: Industrial
+  short_name: Industrial
   definition: >
-    Content related to mining, agriculture, manufacturing, utilities, and construction. This includes raw materials, industrial goods, chemicals, and textiles.
+    Topics related to mining, agriculture, manufacturing, utilities and construction. Includes: raw materials, industrial goods, chemicals, textiles. For general business topics or business finance, prefer 'Finance & Business' instead.
 
-- id: L017
+- id: T017
   name: Literature
+  short_name: Literature
   definition: >
-    Content related to literature. This includes literary criticism, linguistics, philosophy, and related subjects in the humanities.
+    Includes: literary criticism, linguistics, philosophy, related subjects in the humanities. For text written in literary style, prefer the topic of the contents instead.
 
-- id: L018
+- id: T018
   name: Politics
+  short_name: Politics
   definition: >
-    Content related to social issues, political campaigns, the legislative process, geopolitics, protests, activism.
+    Includes: social issues, political campaigns, the legislative process, geopolitics, protests, activism.
 
-- id: L019
+- id: T019
   name: Religion
+  short_name: Religion
   definition: >
-    Content related to religion. This includes spirituality, faith, and religious practices.
+    Includes: spirituality.
 
-- id: L020
+- id: T020
   name: Science, Math & Technology
+  short_name: Science & Tech.
   definition: >
-    Content related to science, mathematics, and technology. This includes physics, chemistry, biology, environmental science, mathematics, statistics, biotech, and engineering.
+    Includes: physics, chemistry, biology, environmental science, mathematics, statistics, biotech, engineering.
 
-- id: L021
+- id: T021
   name: Software
+  short_name: Software
   definition: >
-    Content related to the use of software and the internet. This includes using applications, websites, online services, operating systems, and cloud computing.
+    Topics related to the use of software and the internet.
 
-- id: L022
+- id: T022
   name: Sports & Fitness
+  short_name: Sports & Fitness
   definition: >
-    Content related to sports and fitness. This includes martial arts, motor sports, outdoor activities, and sports equipment.
+    Includes: martial arts, motor sports, outdoor activities, sports equipment.
 
-- id: L023
+- id: T023
   name: Transportation
+  short_name: Transportation
   definition: >
-    Content related to transportation. This includes cars and other vehicles, taxis, public transportation, traffic, commuting, aviation, rail, shipping, and logistics.
+    Includes: cars and other vehicles, taxis, public transportation, traffic, commuting, aviation, rail, shipping, logistics.
 
-- id: L024
+- id: T024
   name: Travel & Tourism
+  short_name: Travel
   definition: >
-    Content related to travel and tourism. This includes hospitality, hotels, sight-seeing, and cruises.
+    Includes: hospitality, hotels, sight-seeing, cruises. For detailed descriptions of tourist destinations, prefer 'History & Geography' instead.

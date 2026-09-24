@@ -1,0 +1,143 @@
+- id: F001
+  name: Academic Writing
+  short_name: Academic Writing
+  definition: >
+    Examples: a research paper, a paper abstract, a thesis, a literature review. This does not include other web pages that have academia and research only as their topic.
+
+- id: F002
+  name: Content Listing
+  short_name: Content Listing
+  definition: >
+    The page contains an overview of content and is used for navigation. Examples: sitemap, product catalog, search results, news listings with short snippets of articles, web directory. Note that hyperlinks are not visible from the text content and you have to deduce which parts of the page contain hyperlinks.
+
+- id: F003
+  name: Creative Writing
+  short_name: Creative Writing
+  definition: >
+    The page content consists of a short story, chapters from a novel, a poem or song lyrics. This does not include other web pages (e.g. forums or news articles) that have literature and fiction only as their topic.
+
+- id: F004
+  name: Customer Support Page
+  short_name: Customer Support
+  definition: >
+    Content by an organization and for a general audience. Examples: a troubleshooting guide. For customer support pages in the specific format of FAQs, prefer 'FAQs' instead.
+
+- id: F005
+  name: Discussion Forum / Comment Section
+  short_name: Comment Section
+  definition: >
+    Community sites like reddit or comment sections on news article or blog posts. Has to contain multiple posts or comments.
+
+- id: F006
+  name: FAQs
+  short_name: FAQ
+  definition: >
+    The page content is in the Frequently Asked Questions format.
+
+- id: F007
+  name: Incomplete Content
+  short_name: Truncated
+  definition: >
+    The page contents are truncated, pay-walled, or require a login to access. If the page has multiple snippets of truncated articles, prefer 'Content Listing' instead. Also includes multimedia web pages where the web page text primarily describes and supplements the audiovisual content, e.g., a YouTube video description or image gallery.
+
+- id: F008
+  name: Knowledge Article
+  short_name: Knowledge Article
+  definition: >
+    Written in an objective and neutral style. Published on a moderated platform (like Wikipedia) or by a reputable source.
+
+- id: F009
+  name: Legal Notices
+  short_name: Legal Notices
+  definition: >
+    Examples: terms of service, legal disclaimers, privacy policy, license agreement. This does not include other web pages that only have law-related topics.
+
+- id: F010
+  name: Listicle
+  short_name: Listicle
+  definition: >
+    A blog or article that presents content in the form of a list. Examples: Buzzfeed-style articles, "Top 10" lists, "7 things you didn't know about Y", "4 best places to visit in Z". If the list is meant to give an overview of the site contents and facilitate navigation, prefer 'Content Listing' instead.
+
+- id: F011
+  name: News Article
+  short_name: News Article
+  definition: >
+    Written by journalists on current events and published by news organizations. For long reads, profiles, editorials, and journalistic essays, prefer 'Nonfiction Writing' instead. For newspaper interviews, prefer 'Transcript / Interview' instead.
+
+- id: F012
+  name: Nonfiction Writing
+  short_name: Nonfiction Writing
+  definition: >
+    Long reads, profiles, editorials, essays, obituaries, memoirs and other forms of nonfiction writing. Written by journalists and other professional writers.
+
+- id: F013
+  name: Organizational About Page
+  short_name: About (Org.)
+  definition: >
+    Typically contains a self-description or introduction by an organization such as a company, university, government agency, non-profit organization. Note that the content may appear similar to a 'Knowledge Article' in some cases, but is not verified and may contain self-promotion.
+
+- id: F014
+  name: Organizational Announcement
+  short_name: News (Org.)
+  definition: >
+    Examples: a press release, a blog post by an organization such as a company, university, government agency, non-profit organization.
+
+- id: F015
+  name: Personal About Page
+  short_name: About (Pers.)
+  definition: >
+    An "About Page" on a personal website or hobby website. Typically contains a self-description, introduction or profile information.
+
+- id: F016
+  name: Personal Blog
+  short_name: Personal Blog
+  definition: >
+    Written by an individual typically relating personal experiences and opinions. If the blog's comment section is longer than the blog post, prefer 'Discussion Forum / Comment Section' instead.
+
+- id: F017
+  name: Product Page
+  short_name: Product Page
+  definition: >
+    Typically contains descriptions and promotions for a product or service. Also includes products in a wider sense, for example university course descriptions. If most of the page content consists of user reviews, prefer 'User Reviews' instead.
+
+- id: F018
+  name: Q&A Forum
+  short_name: Q&A Forum
+  definition: >
+    A user forum with an explicit question & answer format, e.g., Quora, Stack Exchange.
+
+- id: F019
+  name: Spam / Ads
+  short_name: Spam / Ads
+  definition: >
+    The page consists primarily of spam content, SEO keyword stuffing, or short online ads for other pages, products or services. Also choose this category if the page has no apparent purpose.
+
+- id: F020
+  name: Structured Data
+  short_name: Structured Data
+  definition: >
+    Multiple data entries with a common structure. Examples: a table, datasheet, movie database, glossary, dictionary, json file, csv, xml.
+
+- id: F021
+  name: Technical Writing
+  short_name: Documentation
+  definition: >
+    Examples: API documentation, README files, source code. If the page only contains a link to documentation, prefer a different category instead. Unlike 'Customer Support Page', this content is meant for developers and experts, rather than end-users.
+
+- id: F022
+  name: Transcript / Interview
+  short_name: Audio Transcript
+  definition: >
+    A written record of spoken language. Examples: interviews (e.g. in a newspaper), the transcript of a court hearing, movie, podcast, lecture or speech.
+
+- id: F023
+  name: Tutorial / How-To Guide
+  short_name: Tutorial
+  definition: >
+    Examples: cooking recipes, DIY instructions, a WikiHow page, a Khan Academy course. The page must contain the actual content of the tutorial / how-to guide. If the page only contains a brief description or promotion of the tutorial, prefer a different category instead. If the guide is specific to products or services from the same website, prefer 'Customer Support Page' instead.
+
+- id: F024
+  name: User Reviews
+  short_name: User Review
+  definition: >
+    Reviews posted by users, e.g., on Yelp, TripAdvisor.

@@ -26,13 +26,13 @@ from transformers.tokenization_utils_base import BatchEncoding  # type: ignore
 
 try:
     from .prompts import (
-        get_english_topic_classification_prompt,
-        get_multilingual_topic_classification_prompt,
+        get_format_classification_prompt,
+        get_topic_classification_prompt,
     )
 except ImportError:
     from prompts import (
-        get_english_topic_classification_prompt,
-        get_multilingual_topic_classification_prompt,
+        get_format_classification_prompt,
+        get_topic_classification_prompt,
     )
 
 M = TypeVar("M", bound=BaseModel)
@@ -44,6 +44,14 @@ def normalize_language(language: str) -> str:
     normalized = language.strip().capitalize()
     if not normalized:
         raise ValueError("language must not be empty")
+    return normalized
+
+
+def normalize_label_type(label_type: str) -> str:
+    """Normalize and validate the supported labeling schemas."""
+    normalized = label_type.strip().lower()
+    if normalized not in {"topic", "format"}:
+        raise ValueError("label_type must be either 'topic' or 'format'")
     return normalized
 
 
@@ -81,6 +89,7 @@ class LabelSelection(BaseModel):
 
     rationale: str | None = None
     labels: list[str] = Field(min_length=1)
+    bad_example: bool
 
     @field_validator("labels")
     @classmethod
@@ -91,27 +100,49 @@ class LabelSelection(BaseModel):
 
 
 class SavedLabelRecord(BaseModel):
-    """Durable output envelope used for resume and post-run validation."""
+    """Flat JSONL output record with the document metadata and labels."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    doc_id: str = Field(min_length=1)
-    input_line: int = Field(ge=1)
-    result: dict[str, Any]
+    id: str = Field(min_length=1)
+    text: str = ""
+    label: str = Field(min_length=1)
+    labels: list[str] = Field(min_length=1)
+    label_rationale: str = ""
+    bad_example: bool = False
+
+    @field_validator("labels")
+    @classmethod
+    def labels_must_be_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("labels must not contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def ensure_primary_label_matches_first_label(self) -> "SavedLabelRecord":
+        if not self.labels:
+            raise ValueError("labels must not be empty")
+        if self.label != self.labels[0]:
+            raise ValueError(
+                f"label must be the first label in labels; got {self.label!r} "
+                f"and {self.labels[0]!r}"
+            )
+        return self
 
 
-class TopicLabel(BaseModel):
-    """Stable label definition loaded from the topic YAML file."""
+class LabelDefinition(BaseModel):
+    """Stable label definition loaded from a YAML file."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
+    short_name: str = Field(min_length=1)
     definition: str = Field(min_length=1)
 
 
-class TopicExample(BaseModel):
-    """One demonstration loaded from the examples YAML file."""
+class LabelExample(BaseModel):
+    """One label demonstration loaded from an examples YAML file."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -121,10 +152,11 @@ class TopicExample(BaseModel):
     explanation: str = Field(min_length=1)
 
 
-def load_topic_resources(
-    labels_path: Path, examples_path: Path
-) -> tuple[list[TopicLabel], list[TopicExample]]:
-    """Load and validate stable labels and demonstrations from YAML files."""
+def load_label_resources(
+    labels_path: Path, examples_path: Path, label_type: str = "topic"
+) -> tuple[list[LabelDefinition], list[LabelExample]]:
+    """Load and validate labels and demonstrations for a labeling schema."""
+    label_type = normalize_label_type(label_type)
     with labels_path.open("r", encoding="utf-8") as handle:
         raw_labels = yaml.safe_load(handle)
     with examples_path.open("r", encoding="utf-8") as handle:
@@ -137,14 +169,29 @@ def load_topic_resources(
     ):
         raise ValueError(f"Expected an 'examples' list in {examples_path}")
 
-    labels = [TopicLabel.model_validate(item) for item in raw_labels]
-    examples = [TopicExample.model_validate(item) for item in raw_examples["examples"]]
+    labels = [LabelDefinition.model_validate(item) for item in raw_labels]
+    normalized_examples = []
+    for item in raw_examples["examples"]:
+        if not isinstance(item, dict):
+            raise ValueError(f"Example must be a mapping in {examples_path}")
+        example = dict(item)
+        if label_type == "format":
+            if "choice" not in example or "label" in example:
+                raise ValueError(
+                    f"Format example must contain 'choice' in {examples_path}"
+                )
+            example["label"] = example.pop("choice")
+        normalized_examples.append(LabelExample.model_validate(example))
+    examples = normalized_examples
     stable_ids = [label.id for label in labels]
     if len(stable_ids) != len(set(stable_ids)):
         raise ValueError(f"Duplicate stable label IDs in {labels_path}")
     label_names = {label.name for label in labels}
     if len(label_names) != len(labels):
         raise ValueError(f"Duplicate label names in {labels_path}")
+    short_names = {label.short_name for label in labels}
+    if len(short_names) != len(labels):
+        raise ValueError(f"Duplicate label short names in {labels_path}")
     unknown_example_labels = {example.label for example in examples} - label_names
     if unknown_example_labels:
         raise ValueError(
@@ -159,7 +206,7 @@ def _prompt_seed(seed: int, doc_id: str) -> int:
 
 
 def _format_prompt_resources(
-    labels: Sequence[TopicLabel], examples: Sequence[TopicExample], seed: int
+    labels: Sequence[LabelDefinition], examples: Sequence[LabelExample], seed: int
 ) -> tuple[str, str, dict[str, str]]:
     """Shuffle resources and return prompt text plus temporary-to-stable IDs."""
     shuffled_labels = list(labels)
@@ -169,7 +216,7 @@ def _format_prompt_resources(
     randomizer.shuffle(shuffled_examples)
 
     temporary_to_stable = {
-        f"T{index:02d}": label.id
+        f"L{index:02d}": label.id
         for index, label in enumerate(shuffled_labels, start=1)
     }
     stable_to_temporary = {
@@ -188,7 +235,7 @@ def _format_prompt_resources(
             temporary_id = stable_to_temporary[stable_id]
         except KeyError as exc:
             raise ValueError(
-                f"Example references unknown topic label name {example.label!r}"
+                f"Example references unknown label name {example.label!r}"
             ) from exc
         example_blocks.append(
             f"URL: {example.url}\n"
@@ -280,17 +327,16 @@ class JsonlResultStore:
                     )
                 try:
                     record = SavedLabelRecord.model_validate_json(line)
-                    result = self.result_model.model_validate(record.result)
                 except (ValidationError, ValueError, json.JSONDecodeError) as exc:
                     raise ValueError(
                         f"Invalid saved result in {self.path}:{line_number}: {exc}"
                     ) from exc
-                self._validate_result(record.doc_id, result)
-                if record.doc_id in self.completed:
+                self._validate_result(record.id, record)
+                if record.id in self.completed:
                     raise ValueError(
-                        f"Duplicate completed doc_id {record.doc_id!r} in {self.path}"
+                        f"Duplicate completed doc_id {record.id!r} in {self.path}"
                     )
-                self.completed.add(record.doc_id)
+                self.completed.add(record.id)
         LOGGER.info(
             "Resuming with %d validated results from %s", len(self.completed), self.path
         )
@@ -300,6 +346,8 @@ class JsonlResultStore:
         if labels is None:
             label = getattr(result, "label", None)
             labels = [label]
+        if not labels:
+            raise ValueError(f"Result for {doc_id!r} is missing labels")
         unknown_labels = set(labels) - self.labels
         if unknown_labels:
             raise ValueError(
@@ -308,6 +356,16 @@ class JsonlResultStore:
             )
         if len(labels) != len(set(labels)):
             raise ValueError(f"Result for {doc_id!r} contains duplicate labels")
+        label = getattr(result, "label", None)
+        if label is not None and labels and label != labels[0]:
+            raise ValueError(
+                f"Result for {doc_id!r} has mismatched primary label "
+                f"{label!r}; expected {labels[0]!r}"
+            )
+        if getattr(result, "id", None) not in (None, doc_id):
+            raise ValueError(
+                f"Result for {doc_id!r} contains mismatched id {result.id!r}"
+            )
 
     def append(
         self, documents: Sequence[tuple[int, InputDocument]], results: Sequence[M]
@@ -326,12 +384,7 @@ class JsonlResultStore:
                     )
                 validated = self.result_model.model_validate(result)
                 self._validate_result(document.doc_id, validated)
-                record = SavedLabelRecord(
-                    doc_id=document.doc_id,
-                    input_line=line_number,
-                    result=validated.model_dump(mode="json"),
-                )
-                handle.write(record.model_dump_json() + "\n")
+                handle.write(validated.model_dump_json() + "\n")
                 self.completed.add(document.doc_id)
             handle.flush()
             os.fsync(handle.fileno())
@@ -371,10 +424,12 @@ class ModelClient:
         max_model_len: int,
         seed: int,
         thinking_mode: str,
+        label_type: str = "topic",
     ) -> None:
         self.model_name = model_name
         self.seed = seed
         self.thinking_mode = thinking_mode
+        self.label_type = normalize_label_type(label_type)
 
         self.llm = LLM(
             model=model_name,
@@ -556,14 +611,15 @@ class ModelClient:
         *,
         documents: Iterable[tuple[int, InputDocument]],
         output_path: Path,
-        labels: Sequence[TopicLabel],
-        examples: Sequence[TopicExample],
+        labels: Sequence[LabelDefinition],
+        examples: Sequence[LabelExample],
         result_model: type[M] = LabelSelection,
         batch_size: int = 32,
         max_tokens: int = 256,
         max_document_tokens: int = 8192,
         max_documents: int | None = None,
         language: str = "English",
+        label_type: str = "topic",
     ) -> int:
         """Process validated documents, save results, and resume safely."""
         stable_ids = [label.id for label in labels]
@@ -576,59 +632,70 @@ class ModelClient:
         if max_documents is not None and max_documents < 1:
             raise ValueError("max_documents must be >= 1")
         language = normalize_language(language)
-        store = JsonlResultStore(output_path, result_model, set(stable_ids))
+        label_type = normalize_label_type(label_type)
+        short_names = [label.short_name for label in labels]
+        if len(short_names) != len(set(short_names)):
+            raise ValueError("labels must contain unique short names")
+        store = JsonlResultStore(output_path, SavedLabelRecord, set(short_names))
         seen_input_ids: set[str] = set()
         processed = 0
         stopped_early = False
 
         pending: list[tuple[int, InputDocument]] = []
-        for line_number, document in documents:
-            if max_documents is not None and len(store.completed) >= max_documents:
-                LOGGER.info(
-                    "Reached max_documents=%d; stopping input processing",
-                    max_documents,
+        document_iterator = iter(documents)
+        try:
+            for line_number, document in document_iterator:
+                if max_documents is not None and len(store.completed) >= max_documents:
+                    LOGGER.info(
+                        "Reached max_documents=%d; stopping input processing",
+                        max_documents,
+                    )
+                    stopped_early = True
+                    break
+                if document.doc_id in seen_input_ids:
+                    raise ValueError(f"Duplicate doc_id {document.doc_id!r} in input")
+                seen_input_ids.add(document.doc_id)
+                if document.doc_id in store.completed:
+                    continue
+                pending.append((line_number, document))
+                remaining = (
+                    max_documents - len(store.completed)
+                    if max_documents is not None
+                    else batch_size
                 )
-                stopped_early = True
-                break
-            if document.doc_id in seen_input_ids:
-                raise ValueError(f"Duplicate doc_id {document.doc_id!r} in input")
-            seen_input_ids.add(document.doc_id)
-            if document.doc_id in store.completed:
-                continue
-            pending.append((line_number, document))
-            remaining = (
-                max_documents - len(store.completed)
-                if max_documents is not None
-                else batch_size
-            )
-            target_batch_size = min(batch_size, remaining)
-            if len(pending) < target_batch_size:
-                continue
+                target_batch_size = min(batch_size, remaining)
+                if len(pending) < target_batch_size:
+                    continue
 
-            batch_processed = self._process_batch(
-                pending,
-                store,
-                labels,
-                examples,
-                result_model,
-                max_tokens,
-                max_document_tokens,
-                language,
-            )
-            processed += batch_processed
-            LOGGER.info(
-                "Processed %d documents in batch; total documents processed: %d",
-                batch_processed,
-                len(store.completed),
-            )
-            pending = []
-            if max_documents is not None and len(store.completed) >= max_documents:
-                LOGGER.info(
-                    "Reached max_documents=%d; stopping input processing",
-                    max_documents,
+                batch_processed = self._process_batch(
+                    pending,
+                    store,
+                    labels,
+                    examples,
+                    result_model,
+                    max_tokens,
+                    max_document_tokens,
+                    language,
+                    label_type,
                 )
-                stopped_early = True
-                break
+                processed += batch_processed
+                LOGGER.info(
+                    "Processed %d documents in batch; total documents processed: %d",
+                    batch_processed,
+                    len(store.completed),
+                )
+                pending = []
+                if max_documents is not None and len(store.completed) >= max_documents:
+                    LOGGER.info(
+                        "Reached max_documents=%d; stopping input processing",
+                        max_documents,
+                    )
+                    stopped_early = True
+                    break
+        finally:
+            close = getattr(document_iterator, "close", None)
+            if close is not None:
+                close()
 
         if pending and (max_documents is None or len(store.completed) < max_documents):
             batch_processed = self._process_batch(
@@ -640,6 +707,7 @@ class ModelClient:
                 max_tokens,
                 max_document_tokens,
                 language,
+                label_type,
             )
             processed += batch_processed
             LOGGER.info(
@@ -665,14 +733,15 @@ class ModelClient:
         *,
         input_path: Path,
         output_path: Path,
-        labels: Sequence[TopicLabel],
-        examples: Sequence[TopicExample],
+        labels: Sequence[LabelDefinition],
+        examples: Sequence[LabelExample],
         result_model: type[M] = LabelSelection,
         batch_size: int = 32,
         max_tokens: int = 256,
         max_document_tokens: int = 8192,
         max_documents: int | None = None,
         language: str = "English",
+        label_type: str = "topic",
     ) -> int:
         """Stream a local JSONL file, label it, save results, and resume."""
         if input_path.resolve() == output_path.resolve():
@@ -688,6 +757,7 @@ class ModelClient:
             max_document_tokens=max_document_tokens,
             max_documents=max_documents,
             language=language,
+            label_type=label_type,
         )
 
     def run_dataset(
@@ -695,8 +765,8 @@ class ModelClient:
         *,
         dataset_name: str,
         output_path: Path,
-        labels: Sequence[TopicLabel],
-        examples: Sequence[TopicExample],
+        labels: Sequence[LabelDefinition],
+        examples: Sequence[LabelExample],
         dataset_config: str | None = None,
         dataset_split: str = "train",
         result_model: type[M] = LabelSelection,
@@ -705,6 +775,7 @@ class ModelClient:
         max_document_tokens: int = 8192,
         max_documents: int | None = None,
         language: str = "English",
+        label_type: str = "topic",
     ) -> int:
         """Stream a HuggingFace dataset, label it, save results, and resume."""
         if not dataset_name.strip():
@@ -726,22 +797,25 @@ class ModelClient:
             max_document_tokens=max_document_tokens,
             max_documents=max_documents,
             language=language,
+            label_type=label_type,
         )
 
     def _process_batch(
         self,
         documents: Sequence[tuple[int, InputDocument]],
         store: JsonlResultStore,
-        labels: Sequence[TopicLabel],
-        examples: Sequence[TopicExample],
+        labels: Sequence[LabelDefinition],
+        examples: Sequence[LabelExample],
         result_model: type[M],
         max_tokens: int,
         max_document_tokens: int,
         language: str,
+        label_type: str,
     ) -> int:
         messages = []
         schemas = []
         mappings = []
+        stable_to_short = {label.id: label.short_name for label in labels}
         for _, document in documents:
             url = document.model_extra.get("url", "") if document.model_extra else None
             document_text = self._truncate_document_text(
@@ -751,21 +825,18 @@ class ModelClient:
             label_text, example_text, temporary_to_stable = _format_prompt_resources(
                 labels, examples, prompt_seed
             )
-            if language == "English":
-                prompt = get_english_topic_classification_prompt(
-                    text=document_text,
-                    url=str(url) if url else None,
-                    labels=label_text,
-                    examples=example_text,
-                )
-            else:
-                prompt = get_multilingual_topic_classification_prompt(
-                    text=document_text,
-                    url=str(url) if url else None,
-                    labels=label_text,
-                    examples=example_text,
-                    language=language,
-                )
+            prompt_function = (
+                get_topic_classification_prompt
+                if label_type == "topic"
+                else get_format_classification_prompt
+            )
+            prompt = prompt_function(
+                text=document_text,
+                url=str(url) if url else None,
+                labels=label_text,
+                examples=example_text,
+                language=language,
+            )
             messages.append(prompt)
             schemas.append(build_label_schema(result_model, list(temporary_to_stable)))
             mappings.append(temporary_to_stable)
@@ -773,19 +844,33 @@ class ModelClient:
         temporary_results = self._run_structured_chat(
             messages, schemas, result_model, max_tokens
         )
-        results = []
-        for result, temporary_to_stable in zip(temporary_results, mappings):
+        results: list[SavedLabelRecord] = []
+        for (line_number, document), result, temporary_to_stable in zip(
+            documents, temporary_results, mappings
+        ):
             stable_result = result.model_dump(mode="python")
             try:
-                stable_result["labels"] = [
+                stable_labels = [
                     temporary_to_stable[temporary_label]
                     for temporary_label in result.labels
                 ]
+                ordered_labels = [
+                    stable_to_short[stable_label] for stable_label in stable_labels
+                ]
             except KeyError as exc:
                 raise StructuredModelOutputError(
-                    f"Model returned unknown temporary label {exc.args[0]!r}"
+                    f"Model returned unknown label {exc.args[0]!r}"
                 ) from exc
-            results.append(result_model.model_validate(stable_result))
+            results.append(
+                SavedLabelRecord(
+                    id=document.doc_id,
+                    text=document.text,
+                    label=ordered_labels[0],
+                    labels=ordered_labels,
+                    label_rationale=result.rationale or "",
+                    bad_example=result.bad_example,
+                )
+            )
         store.append(documents, results)
         return len(results)
 
@@ -801,7 +886,7 @@ class ModelClient:
         return self.tokenizer.decode(input_ids, skip_special_tokens=True)
 
 
-def run_topic_jsonl(
+def run_jsonl(
     client: ModelClient,
     *,
     input_path: Path,
@@ -813,9 +898,10 @@ def run_topic_jsonl(
     max_document_tokens: int = 8192,
     max_documents: int | None = None,
     language: str = "English",
+    label_type: str = "topic",
 ) -> int:
-    """Run topic classification using YAML labels and demonstrations."""
-    labels, examples = load_topic_resources(labels_path, examples_path)
+    """Run classification using YAML labels and demonstrations."""
+    labels, examples = load_label_resources(labels_path, examples_path, label_type)
     return client.run_jsonl(
         input_path=input_path,
         output_path=output_path,
@@ -826,10 +912,11 @@ def run_topic_jsonl(
         max_document_tokens=max_document_tokens,
         max_documents=max_documents,
         language=language,
+        label_type=label_type,
     )
 
 
-def run_topic_dataset(
+def run_dataset(
     client: ModelClient,
     *,
     dataset_name: str,
@@ -843,9 +930,10 @@ def run_topic_dataset(
     max_document_tokens: int = 8192,
     max_documents: int | None = None,
     language: str = "English",
+    label_type: str = "topic",
 ) -> int:
-    """Run topic classification from a streamed HuggingFace dataset."""
-    labels, examples = load_topic_resources(labels_path, examples_path)
+    """Run classification from a streamed HuggingFace dataset."""
+    labels, examples = load_label_resources(labels_path, examples_path, label_type)
     return client.run_dataset(
         dataset_name=dataset_name,
         output_path=output_path,
@@ -858,6 +946,7 @@ def run_topic_dataset(
         max_document_tokens=max_document_tokens,
         max_documents=max_documents,
         language=language,
+        label_type=label_type,
     )
 
 
@@ -893,6 +982,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-document-tokens", type=int)
     parser.add_argument("--max-documents", type=int)
     parser.add_argument("--language")
+    parser.add_argument("--label-type", choices=("topic", "format"))
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
@@ -937,6 +1027,7 @@ def _load_cli_config(path: Path) -> dict[str, Any]:
             "max_document_tokens",
             "max_documents",
             "language",
+            "label_type",
             "log_level",
         },
     }
@@ -962,6 +1053,7 @@ def _load_cli_config(path: Path) -> dict[str, Any]:
         ("run", "max_document_tokens"): "max_document_tokens",
         ("run", "max_documents"): "max_documents",
         ("run", "language"): "language",
+        ("run", "label_type"): "label_type",
         ("run", "log_level"): "log_level",
     }
     for section, keys in section_keys.items():
@@ -1027,9 +1119,9 @@ def _merge_cli_and_config(
     parser.set_defaults(**config_values)
     args = parser.parse_args(argv)
     defaults = {
-        "labels_path": Path("scripts/data_processing/topics.yaml"),
-        "examples_path": Path("scripts/data_processing/topic_examples.yaml"),
-        "model_name": "Qwen/Qwen3.6-35B-A3B",
+        "labels_path": None,
+        "examples_path": None,
+        "model_name": "Qwen/Qwen3.8-27B",
         "tensor_parallel_size": 1,
         "gpu_memory_utilization": 0.9,
         "dtype": "auto",
@@ -1041,6 +1133,7 @@ def _merge_cli_and_config(
         "max_document_tokens": 8192,
         "max_documents": None,
         "language": "English",
+        "label_type": "topic",
         "log_level": "INFO",
     }
     for name, value in defaults.items():
@@ -1082,6 +1175,19 @@ def _merge_cli_and_config(
         args.language = normalize_language(args.language)
     except ValueError as exc:
         parser.error(str(exc))
+    try:
+        args.label_type = normalize_label_type(args.label_type)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.labels_path is None:
+        args.labels_path = Path(f"scripts/data_processing/{args.label_type}s.yaml")
+    if args.examples_path is None:
+        examples_name = (
+            "topic_examples.yaml"
+            if args.label_type == "topic"
+            else "format_examples.yaml"
+        )
+        args.examples_path = Path(f"scripts/data_processing/{examples_name}")
     if args.max_model_len < 1 or args.tensor_parallel_size < 1:
         parser.error("--max-model-len and --tensor-parallel-size must be >= 1")
     if not 0.0 < args.gpu_memory_utilization <= 1.0:
@@ -1095,14 +1201,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run topic classification from CLI and YAML configuration."""
     parser = build_arg_parser()
     args = _merge_cli_and_config(parser, argv)
-    LOGGER.info("Run args:")
-    for key, value in vars(args).items():
-        LOGGER.info("  %s: %s", key, value)
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
+    LOGGER.info("Run args:")
+    for key, value in vars(args).items():
+        LOGGER.info("  %s: %s", key, value)
+
+    # Check if we already have enough completed documents before loading the model
+    if args.max_documents is not None:
+        labels, _ = load_label_resources(
+            args.labels_path, args.examples_path, args.label_type
+        )
+        completed_results = JsonlResultStore(
+            args.output_path,
+            SavedLabelRecord,
+            {label.short_name for label in labels},
+        )
+        completed_count = len(completed_results.completed)
+        if completed_count >= args.max_documents:
+            LOGGER.info(
+                "Already have %d completed documents; max_documents=%d reached "
+                "before loading the model. Terminating early.",
+                completed_count,
+                args.max_documents,
+            )
+            return 0
+
     client = ModelClient(
         model_name=args.model_name,
         tensor_parallel_size=args.tensor_parallel_size,
@@ -1111,6 +1238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_model_len=args.max_model_len,
         seed=args.seed,
         thinking_mode=args.thinking_mode,
+        label_type=args.label_type,
     )
     common_kwargs = {
         "output_path": args.output_path,
@@ -1121,11 +1249,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "max_document_tokens": args.max_document_tokens,
         "max_documents": args.max_documents,
         "language": args.language,
+        "label_type": args.label_type,
     }
     if args.input_jsonl is not None:
-        run_topic_jsonl(client, input_path=args.input_jsonl, **common_kwargs)
+        run_jsonl(client, input_path=args.input_jsonl, **common_kwargs)
     else:
-        run_topic_dataset(
+        run_dataset(
             client,
             dataset_name=args.input_dataset,
             dataset_config=args.dataset_config,
@@ -1136,4 +1265,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
