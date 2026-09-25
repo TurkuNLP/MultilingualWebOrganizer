@@ -87,7 +87,7 @@ class LabelSelection(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    rationale: str | None = None
+    rationale: str | None = Field(default=None, max_length=1000)
     labels: list[str] = Field(min_length=1)
     bad_example: bool
 
@@ -464,6 +464,7 @@ class ModelClient:
             temperature=0.0,
             seed=self.seed,
             max_tokens=max_tokens,
+            repetition_penalty=1.1,  # Repetion penalty to reduce repetition loops
             structured_outputs=structured,
         )
 

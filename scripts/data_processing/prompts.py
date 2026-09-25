@@ -42,7 +42,7 @@ def get_topic_classification_prompt(
     Set "bad_example" to false unless the conditions in the next section apply. Set "bad_example" to false if you are unsure.
     
     ### Difficult cases and bad examples
-    If you are unsure, make your best guess. When evidence is ambiguous, select the best-supported label.
+    When evidence is ambiguous and you are unsure, select the best-supported label. Do not fill the rationale with uncertainty or speculation.
     Set bad_example to true only when the supplied content is unintelligible, contains too little meaningful information to identify a topic, or clearly falls outside all provided categories. Brevity or uncertainty alone is not sufficient. When true, still return the single closest label as a required fallback.
     
     ### Output schema
@@ -93,7 +93,7 @@ def get_format_classification_prompt(
     Set "bad_example" to false unless the conditions in the next section apply. Set "bad_example" to false if you are unsure.
     
     ### Difficult cases and bad examples
-    If you are unsure, make your best guess. When evidence is ambiguous, select the best-supported label.
+    When evidence is ambiguous and you are unsure, select the best-supported label. Do not fill the rationale with uncertainty or speculation.
     Set bad_example to true only when the supplied content is unintelligible, contains too little meaningful information to identify a format, or clearly falls outside all provided categories. Brevity or uncertainty alone is not sufficient. When true, still return the single closest label as a required fallback.
     
     ### Output schema
