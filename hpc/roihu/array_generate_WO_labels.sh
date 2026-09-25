@@ -7,8 +7,8 @@
 #SBATCH --ntasks-per-node=1 --cpus-per-task=288 # 72 CPUs per GPU (288 for 4 GPUs, 144 for 2 GPUs, 72 for 1 GPU)
 #SBATCH --gres=gpu:gh200:4
 #SBATCH --mem=434172
-#SBATCH -o ../../logs/label_%j.out
-#SBATCH -e ../../logs/label_%j.err
+#SBATCH -o ../../logs/label_%A_%a.out
+#SBATCH -e ../../logs/label_%A_%a.err
 #SBATCH --array=0-11%6
 
 # How to run on Roihu (submit from this directory so relative log paths resolve):

@@ -1,15 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=label
 #SBATCH --account=project_462001516
-#SBATCH --partition=standard-g
+#SBATCH --partition=small-g
 #SBATCH --time=08:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=56
+#SBATCH --cpus-per-task=28 # 56 for 8 GPUs, 28 for 4 GPUs 
 #SBATCH --mem=120G
-#SBATCH --gpus-per-node=8
-#SBATCH -o ../../logs/label_%j.out
-#SBATCH -e ../../logs/label_%j.err
+#SBATCH --gpus-per-node=4
+#SBATCH -o ../../logs/label_%A_%a.out
+#SBATCH -e ../../logs/label_%A_%a.err
 #SBATCH --array=0-11%6
 
 # How to run on LUMI (submit from this directory so relative log paths resolve):
@@ -74,18 +74,18 @@ fi
 
 # Models to try
 # Qwen/Qwen3.8-27B
-# Qwen/Qwen3.5-122B-A10B requires --tensor-parallel-size 8
 # google/gemma-4-31B-it
+# Qwen/Qwen3.5-122B-A10B requires --tensor-parallel-size 8
 # mistralai/Mistral-Medium-3.5-128B --tensor-parallel-size 8
 
 srun singularity run -B /scratch/project_462001516 "$SIF" python "$python_script" \
     --config "$base_dir/configs/lumi/generate_base.yaml" \
-    --model mistralai/Mistral-Medium-3.5-128B \
-    --tensor-parallel-size 8 \
+    --model google/gemma-4-31B-it \
+    --tensor-parallel-size 4 \
     --dataset-config "$dataset_config" \
     --dataset-split "$dataset_split" \
     --language "$language" \
     --label-type "$label_type" \
     --labels "$base_dir/scripts/data_processing/${label_type}s.yaml" \
     --examples "$base_dir/scripts/data_processing/${label_type}_examples.yaml" \
-    --output "$base_dir/results/Mistral-Medium-3.5-128B-annotations/${label_type}/${language}-parallel.jsonl"
+    --output "$base_dir/results/gemma-4-31B-it-annotations/${label_type}/${language}-parallel.jsonl"
