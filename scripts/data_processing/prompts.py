@@ -46,7 +46,7 @@ def get_topic_classification_prompt(
     Set bad_example to true only when the supplied content is unintelligible, contains too little meaningful information to identify a topic, or clearly falls outside all provided categories. Brevity or uncertainty alone is not sufficient. When true, still return the single closest label as a required fallback.
     
     ### Output schema
-    Return only a JSON object with the following structure: {{"rationale": str, "labels": list[str], "bad_example": bool}}.
+    Return only a valid JSON object with the following structure: {{"rationale": str, "labels": list[str], "bad_example": bool}}.
     """
 
     user_prompt = f"""
@@ -97,7 +97,7 @@ def get_format_classification_prompt(
     Set bad_example to true only when the supplied content is unintelligible, contains too little meaningful information to identify a format, or clearly falls outside all provided categories. Brevity or uncertainty alone is not sufficient. When true, still return the single closest label as a required fallback.
     
     ### Output schema
-    Return only a JSON object with the following structure: {{"rationale": str, "labels": list[str], "bad_example": bool}}.
+    Return only a valid JSON object with the following structure: {{"rationale": str, "labels": list[str], "bad_example": bool}}.
     """
 
     user_prompt = f"""

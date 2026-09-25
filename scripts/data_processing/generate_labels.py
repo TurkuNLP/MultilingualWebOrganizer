@@ -439,16 +439,26 @@ class ModelClient:
             max_model_len=max_model_len,
             performance_mode="throughput",
             seed=seed,
+            language_model_only=True,
         )
         self.tokenizer = self.llm.get_tokenizer()
         self.max_model_len = int(self.llm.model_config.max_model_len)
 
     @property
     def chat_template_kwargs(self) -> dict[str, Any] | None:
+        """Return the thinking effort kwargs for the chat template.
+        Mistral uses reasoning_effort, while gemma and qwen models use enable_thinking.
+        This might need to be modified if other models are used in the future."""
         if self.thinking_mode == "disabled":
-            return {"enable_thinking": False}
+            if "mistral" in self.model_name.lower():
+                return {"reasoning_effort": "none"}
+            else:
+                return {"enable_thinking": False}
         if self.thinking_mode == "enabled":
-            return {"enable_thinking": True}
+            if "mistral" in self.model_name.lower():
+                return {"reasoning_effort": "high"}
+            else:
+                return {"enable_thinking": True}
         if self.thinking_mode == "template-default":
             return None
         raise ValueError(f"Unknown thinking mode: {self.thinking_mode}")
@@ -460,11 +470,31 @@ class ModelClient:
         max_tokens: int,
     ) -> SamplingParams:
         structured = StructuredOutputsParams(json=json_schema)
+
+        # Set temperature based on model family
+        if "qwen" in self.model_name.lower():
+            temperature = 0.7
+            top_p = 0.80
+            top_k = 20
+        elif "gemma" in self.model_name.lower():
+            temperature = 1.0
+            top_p = 0.95
+            top_k = 64
+        elif "mistral" in self.model_name.lower():
+            temperature = 0.5
+            top_p = 0.95
+            top_k = 64
+        else:
+            temperature = 0.7
+            top_p = 0.95
+            top_k = 64
+
         return SamplingParams(
-            temperature=0.0,
+            temperature=temperature,
             seed=self.seed,
             max_tokens=max_tokens,
-            repetition_penalty=1.1,  # Repetion penalty to reduce repetition loops
+            top_p=top_p,
+            top_k=top_k,
             structured_outputs=structured,
         )
 
