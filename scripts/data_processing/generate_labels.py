@@ -591,7 +591,14 @@ class ModelClient:
                 raise StructuredModelOutputError(f"model returned empty output")
 
             try:
-                parsed.append(result_model.model_validate_json(generated_text))
+                # Drop duplicate labels while preserving order, then validate the result model
+                # If duplicate labels are present, the last occurrenece will be dropped.
+                raw_result = json.loads(generated_text)
+                if isinstance(raw_result, dict) and isinstance(
+                    raw_result.get("labels"), list
+                ):
+                    raw_result["labels"] = list(dict.fromkeys(raw_result["labels"]))
+                parsed.append(result_model.model_validate(raw_result))
             except (
                 ValidationError,
                 json.JSONDecodeError,
