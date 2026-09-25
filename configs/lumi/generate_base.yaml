@@ -1,0 +1,19 @@
+paths:
+  base_dir: /scratch/project_462001516/users/tarkkaot/MultilingualWebOrganizer
+  input_dataset: MultiSynt/MT-Nemotron-CC
+
+model:
+  name: Qwen/Qwen3.8-27B
+  tensor_parallel_size: 4
+  gpu_memory_utilization: 0.9
+  dtype: auto
+  max_model_len: 32768
+  seed: 0
+  thinking_mode: disabled
+
+run:
+  batch_size: 512
+  max_tokens: 4096
+  max_document_tokens: 8192
+  max_documents: 10000
+  log_level: INFO
