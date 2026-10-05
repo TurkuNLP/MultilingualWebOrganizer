@@ -24,26 +24,20 @@ def read_llm_records(path: Path) -> Iterator[tuple[str, str, str]]:
                 if not isinstance(record, dict):
                     raise TypeError("record must be a JSON object")
 
-                doc_id = record.get("doc_id")
-                result = record.get("result")
-                labels = result.get("labels") if isinstance(result, dict) else None
+                doc_id = record.get("id")
+                label = record.get("label") if isinstance(record, dict) else None
                 rationale = (
-                    result.get("rationale") if isinstance(result, dict) else None
+                    record.get("label_rationale") if isinstance(record, dict) else None
                 )
 
                 if not isinstance(doc_id, str) or not doc_id:
-                    raise TypeError("doc_id must be a non-empty string")
-                if (
-                    not isinstance(labels, list)
-                    or not labels
-                    or any(not isinstance(label, str) or not label for label in labels)
-                    or len(labels) != len(set(labels))
-                ):
-                    raise TypeError("result.labels must be unique non-empty strings")
+                    raise TypeError("id must be a non-empty string")
+                if not isinstance(label, str) or not label:
+                    raise TypeError("label must be a non-empty string")
                 if not isinstance(rationale, str):
-                    raise TypeError("result.rationale must be a string")
+                    raise TypeError("label_rationale must be a string")
 
-                yield doc_id, labels[0], rationale
+                yield doc_id, label, rationale
             except (json.JSONDecodeError, TypeError, AttributeError) as exc:
                 raise ValueError(
                     f"Invalid label record in {path}:{line_number}: {exc}"
@@ -167,7 +161,7 @@ def calculate_metrics(
 
 
 def save_comparison_results(metrics: dict[str, Metrics], output_file: Path) -> None:
-    """Persist comparison results to a JSON file."""
+    """Persist classifier-versus-LLM comparison results to a JSON file."""
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with output_file.open("w", encoding="utf-8") as handle:
         json.dump(metrics, handle, indent=2, ensure_ascii=False)
@@ -191,7 +185,7 @@ def parse_args() -> argparse.Namespace:
         "--output_file",
         type=Path,
         required=True,
-        help="Path to the output JSON file for comparison results",
+        help="Path to the classifier-versus-LLM comparison JSON file",
     )
     return parser.parse_args()
 

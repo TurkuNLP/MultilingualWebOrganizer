@@ -1,11 +1,11 @@
 paths:
   base_dir: /scratch/project_2020507/users/tarkkaot/MultilingualWebOrganizer
   input_dataset: MultiSynt/MT-Nemotron-CC
-  dataset_config: hun_Latn
-  dataset_split: tower9b_parallel
-  output: ${base_dir}/results/hungarian-parallel.jsonl
-  labels: ${base_dir}/scripts/data_processing/topics.yaml
-  examples: ${base_dir}/scripts/data_processing/topic_examples.yaml
+  dataset_config: eng_Latn
+  dataset_split: parallel
+  output: ${base_dir}/results/distribution/${label_type}/english-parallel.jsonl
+  labels: ${base_dir}/scripts/data_processing/${label_type}s.yaml
+  examples: ${base_dir}/scripts/data_processing/${label_type}_examples.yaml
 
 model:
   name: Qwen/Qwen3.8-27B
@@ -18,8 +18,7 @@ model:
 
 run:
   batch_size: 512
-  max_tokens: 8192 # max tokens to generate
   max_document_tokens: 8192
   log_level: INFO
   max_documents: 10000
-  language: hungarian
+  language: English

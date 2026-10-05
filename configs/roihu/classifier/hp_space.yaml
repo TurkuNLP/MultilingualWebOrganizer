@@ -1,0 +1,24 @@
+# configs/roihu/classifier/hp_space.yaml
+# Search space for the classifier's hyperparameter search (finetune.py --hp_search_space,
+# launched with hpc/roihu/hp_search_classifier.sh). Each trial draws one value per
+# parameter; see scripts/model_training/hp_search.py for the distributions.
+#
+# Changing this file changes what every trial index means: start a new search
+# (new search name) after editing it. Completed trials refuse to be overwritten
+# with different parameters.
+
+parameters:
+  # mmBERT fine-tuning typically works at 1e-5 to 1e-4; log scale spreads trials evenly.
+  learning_rate: {distribution: log_uniform, low: 1.0e-5, high: 1.5e-4}
+  weight_decay: {distribution: uniform, low: 0.0, high: 0.1}
+  # A float below 1 is a fraction of the total training steps.
+  warmup_steps: {distribution: uniform, low: 0.0, high: 0.15}
+  # Each trial evaluates every epoch and is scored by its best epoch, so the number of
+  # epochs mostly sets the learning-rate schedule length.
+  num_train_epochs: {distribution: choice, values: [2, 3, 4]}
+  # Effective batch size 16, 32, or 64 at --per_device_train_batch_size 8.
+  gradient_accumulation_steps: {distribution: choice, values: [2, 4, 8]}
+  # >1 flattens the LLM label distributions in the training loss; evaluation always
+  # uses the original distributions.
+  label_temperature: {distribution: choice, values: [1.0, 1.5, 2.0, 3.0]}
+  classifier_pooling: {distribution: choice, values: [cls, mean]}

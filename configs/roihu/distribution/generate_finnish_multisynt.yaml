@@ -1,7 +1,11 @@
-# configs/roihu/generate_base.yaml
 paths:
   base_dir: /scratch/project_2020507/users/tarkkaot/MultilingualWebOrganizer
   input_dataset: MultiSynt/MT-Nemotron-CC
+  dataset_config: fin_Latn
+  dataset_split: tower72b_parallel
+  output: ${base_dir}/results/distribution/${label_type}/finnish-parallel.jsonl
+  labels: ${base_dir}/scripts/data_processing/${label_type}s.yaml
+  examples: ${base_dir}/scripts/data_processing/${label_type}_examples.yaml
 
 model:
   name: Qwen/Qwen3.8-27B
@@ -14,7 +18,7 @@ model:
 
 run:
   batch_size: 512
-  max_tokens: 8192
   max_document_tokens: 8192
-  max_documents: 10000
   log_level: INFO
+  max_documents: 10000
+  language: finnish

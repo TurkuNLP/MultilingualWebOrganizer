@@ -3,9 +3,9 @@ paths:
   input_dataset: MultiSynt/MT-Nemotron-CC
   dataset_config: isl_Latn
   dataset_split: tower9b_parallel
-  output: ${base_dir}/results/icelandic-parallel.jsonl
-  labels: ${base_dir}/scripts/data_processing/topics.yaml
-  examples: ${base_dir}/scripts/data_processing/topic_examples.yaml
+  output: ${base_dir}/results/multilabel/${label_type}/icelandic-parallel.jsonl
+  labels: ${base_dir}/scripts/data_processing/${label_type}s.yaml
+  examples: ${base_dir}/scripts/data_processing/${label_type}_examples.yaml
 
 model:
   name: Qwen/Qwen3.8-27B

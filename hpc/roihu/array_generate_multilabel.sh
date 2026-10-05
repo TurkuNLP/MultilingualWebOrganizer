@@ -2,11 +2,10 @@
 #SBATCH --job-name=discover_topic_labels
 #SBATCH --account=project_2020507
 #SBATCH --partition=gpumedium
-#SBATCH --time=02:00:00
+#SBATCH --time=01:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1 --cpus-per-task=288 # 72 CPUs per GPU (288 for 4 GPUs, 144 for 2 GPUs, 72 for 1 GPU)
 #SBATCH --gres=gpu:gh200:4
-#SBATCH --mem=434172
 #SBATCH -o ../../logs/label_%A_%a.out
 #SBATCH -e ../../logs/label_%A_%a.err
 #SBATCH --array=0-11%6
@@ -29,7 +28,7 @@ module purge
 module load python-vllm/0.19.1
 
 base_dir="/scratch/project_2020507/users/tarkkaot/MultilingualWebOrganizer"
-python_script="$base_dir/scripts/data_processing/generate_labels.py"
+python_script="$base_dir/scripts/data_processing/generate_multilabel.py"
 
 languages=(english finnish german hungarian icelandic ukrainian)
 dataset_configs=(eng_Latn fin_Latn deu_Latn hun_Latn isl_Latn ukr_Cyrl)
@@ -63,9 +62,12 @@ fi
 
 # Clear cache after running the larger models.
 
+model="Qwen/Qwen3.5-122B-A10B"
+
+# ${model##*/} drops the organization prefix, e.g. Qwen3.5-122B-A10B.
 srun python "$python_script" \
-    --config "$base_dir/configs/roihu/generate_base.yaml" \
-    --model Qwen/Qwen3.5-122B-A10B \
+    --config "$base_dir/configs/roihu/multilabel/generate_base.yaml" \
+    --model $model \
     --tensor-parallel-size 4 \
     --dataset-config "$dataset_config" \
     --dataset-split "$dataset_split" \
@@ -73,4 +75,4 @@ srun python "$python_script" \
     --label-type "$label_type" \
     --labels "$base_dir/scripts/data_processing/${label_type}s.yaml" \
     --examples "$base_dir/scripts/data_processing/${label_type}_examples.yaml" \
-    --output "$base_dir/results/Qwen3.5-122B-A10B-annotations/${label_type}/${language}-parallel.jsonl"
+    --output "$base_dir/results/multilabel/${model##*/}-annotations/${label_type}/${language}-parallel.jsonl"

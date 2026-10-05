@@ -1,143 +1,155 @@
 - id: T001
   name: Adult Content
   short_name: Adult
-  definition: >
-    ""
+  definition: >-
+    Includes: pornography, sexually explicit material, and adult services such as escort or webcam sites.
 
 - id: T002
   name: Art & Design
   short_name: Art & Design
-  definition: >
+  definition: >-
     Includes: architecture
 
 - id: T003
   name: Software Development
   short_name: Software Dev.
-  definition: >
+  definition: >-
     Includes: algorithms, coding, and web development.
 
 - id: T004
   name: Crime & Law
   short_name: Crime & Law
-  definition: >
-    Includes: law enforcement. For financial crime and litigation, prefer 'Finance & Business' instead. For social issues and the legislative process, prefer 'Politics & Social Issues' instead.
+  definition: >-
+    Includes: law enforcement. For financial crime and litigation, prefer 'Finance & Business' instead. For social issues and the legislative process, prefer 'Politics' instead.
 
 - id: T005
   name: Education & Jobs
   short_name: Education & Jobs
-  definition: >
+  definition: >-
     Includes: pedagogy, training & certification, academia. If the page is educational about a specific topic, e.g. food or mathematics, prefer that topic instead.
 
 - id: T006
   name: Electronics & Hardware
   short_name: Hardware
-  definition: >
+  definition: >-
     Includes: computer hardware, phones, televisions, other consumer electronics.
 
 - id: T007
   name: Entertainment
   short_name: Entertainment
-  definition: >
+  definition: >-
     Includes: music, movies, TV shows, videos, celebrities, humor, nightlife. If the page discusses music or film as art rather than entertainment, prefer 'Art & Design' instead.
 
 - id: T008
   name: Social Life
   short_name: Social Life
-  definition: >
+  definition: >-
     Includes: family, friends, relationships, community. If the article focuses on a specific social activity (e.g. sports or board games), prefer the topic of the activity instead.
 
 - id: T009
   name: Fashion & Beauty
   short_name: Fashion & Beauty
-  definition: >
+  definition: >-
     Includes: clothing, accessories, cosmetics.
 
 - id: T010
   name: Finance & Business
   short_name: Finance & Business
-  definition: >
+  definition: >-
     Includes: taxes, regulations, investments, insurance, credit cards, personal finance, corporate communication, marketing, human resources.
 
 - id: T011
   name: Food & Dining
   short_name: Food & Dining
-  definition: >
+  definition: >-
     Includes: recipes, groceries, beverages, restaurants. For nutritional science, prefer 'Health' instead.
 
 - id: T012
   name: Games
   short_name: Games
-  definition: >
+  definition: >-
     Includes: video games, board games, gambling.
 
 - id: T013
   name: Health
   short_name: Health
-  definition: >
+  definition: >-
     Includes: medicine, wellness, mental health, veterinary science, nutritional science. For health insurance, prefer 'Finance & Business' instead.
 
 - id: T014
   name: History & Geography
   short_name: History
-  definition: >
+  definition: >-
     Includes: archaeology.
 
 - id: T015
   name: Home & Hobbies
   short_name: Home & Hobbies
-  definition: >
+  definition: >-
     Includes: real estate, renting, relocation, furniture, appliances, home improvement, DIY, gardening, pets, toys, collecting.
 
 - id: T016
   name: Industrial
   short_name: Industrial
-  definition: >
+  definition: >-
     Topics related to mining, agriculture, manufacturing, utilities and construction. Includes: raw materials, industrial goods, chemicals, textiles. For general business topics or business finance, prefer 'Finance & Business' instead.
 
 - id: T017
   name: Literature
   short_name: Literature
-  definition: >
+  definition: >-
     Includes: literary criticism, linguistics, philosophy, related subjects in the humanities. For text written in literary style, prefer the topic of the contents instead.
 
 - id: T018
   name: Politics
   short_name: Politics
-  definition: >
+  definition: >-
     Includes: social issues, political campaigns, the legislative process, geopolitics, protests, activism.
 
 - id: T019
   name: Religion
   short_name: Religion
-  definition: >
+  definition: >-
     Includes: spirituality.
 
 - id: T020
   name: Science, Math & Technology
   short_name: Science & Tech.
-  definition: >
+  definition: >-
     Includes: physics, chemistry, biology, environmental science, mathematics, statistics, biotech, engineering.
 
 - id: T021
   name: Software
   short_name: Software
-  definition: >
+  definition: >-
     Topics related to the use of software and the internet.
 
 - id: T022
   name: Sports & Fitness
   short_name: Sports & Fitness
-  definition: >
+  definition: >-
     Includes: martial arts, motor sports, outdoor activities, sports equipment.
 
 - id: T023
   name: Transportation
   short_name: Transportation
-  definition: >
+  definition: >-
     Includes: cars and other vehicles, taxis, public transportation, traffic, commuting, aviation, rail, shipping, logistics.
 
 - id: T024
   name: Travel & Tourism
   short_name: Travel
-  definition: >
+  definition: >-
     Includes: hospitality, hotels, sight-seeing, cruises. For detailed descriptions of tourist destinations, prefer 'History & Geography' instead.
+
+- id: T025
+  name: Other
+  short_name: Other
+  definition: >-
+    The topic of the page is not covered by any of the other categories.
+
+- id: T026
+  name: Bad example
+  short_name: Bad example
+  definition: >-
+    The page content is not suitable for the task. It is nonsensical or too short to discern a topic.

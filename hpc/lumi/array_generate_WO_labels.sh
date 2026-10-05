@@ -44,7 +44,7 @@ export HF_HUB_CACHE="$HF_HOME/hub"
 export VLLM_CACHE_ROOT="$cache_base_dir/vllm"
 mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE" "$VLLM_CACHE_ROOT"
 
-python_script="$base_dir/scripts/data_processing/generate_labels.py"
+python_script="$base_dir/scripts/data_processing/generate_multilabel.py"
 SIF="$base_dir/environments/lumi/vllm.sif"
 
 
@@ -79,7 +79,7 @@ fi
 # mistralai/Mistral-Medium-3.5-128B --tensor-parallel-size 8
 
 srun singularity run -B /scratch/project_462001516 "$SIF" python "$python_script" \
-    --config "$base_dir/configs/lumi/generate_base.yaml" \
+    --config "$base_dir/configs/lumi/multilabel/generate_base.yaml" \
     --model google/gemma-4-31B-it \
     --tensor-parallel-size 4 \
     --dataset-config "$dataset_config" \

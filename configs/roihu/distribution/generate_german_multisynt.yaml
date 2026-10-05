@@ -1,0 +1,24 @@
+paths:
+  base_dir: /scratch/project_2020507/users/tarkkaot/MultilingualWebOrganizer
+  input_dataset: MultiSynt/MT-Nemotron-CC
+  dataset_config: deu_Latn
+  dataset_split: tower72b_parallel
+  output: ${base_dir}/results/distribution/${label_type}/german-parallel.jsonl
+  labels: ${base_dir}/scripts/data_processing/${label_type}s.yaml
+  examples: ${base_dir}/scripts/data_processing/${label_type}_examples.yaml
+
+model:
+  name: Qwen/Qwen3.8-27B
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.9
+  dtype: auto
+  max_model_len: 32768
+  seed: 0
+  thinking_mode: disabled
+
+run:
+  batch_size: 512
+  max_document_tokens: 8192
+  log_level: INFO
+  max_documents: 10000
+  language: german

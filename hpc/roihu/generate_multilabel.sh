@@ -4,8 +4,8 @@
 #SBATCH --partition=gpumedium
 #SBATCH --time=02:00:00
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1 --cpus-per-task=144
-#SBATCH --gres=gpu:gh200:2
+#SBATCH --ntasks-per-node=1 --cpus-per-task=288
+#SBATCH --gres=gpu:gh200:4
 #SBATCH --mem=434172
 #SBATCH -o ../../logs/label_%j.out
 #SBATCH -e ../../logs/label_%j.err
@@ -30,13 +30,21 @@ mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE"
 
 # Define paths to the base directory and Python script.
 base_dir="/scratch/project_2020507/users/tarkkaot/MultilingualWebOrganizer"
-python_script="$base_dir/scripts/data_processing/generate_labels.py"
+python_script="$base_dir/scripts/data_processing/generate_multilabel.py"
 
 # Set vLLM cache root to a directory in the scratch space
 export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-$base_dir/cache/vllm}"
 mkdir -p "$VLLM_CACHE_ROOT"
 
 lang="$1"
+label_type="${2:-topic}"
+model="google/gemma-4-31B-it"
 
+# ${model##*/} drops the organization prefix, e.g. Qwen3.5-122B-A10B.
 srun python "$python_script" \
-            --config "$base_dir/configs/roihu/generate_${lang}_multisynt.yaml"
+            --config "$base_dir/configs/roihu/multilabel/generate_${lang}_multisynt.yaml" \
+            --model $model \
+            --label-type "$label_type" \
+            --labels "$base_dir/scripts/data_processing/${label_type}s.yaml" \
+            --examples "$base_dir/scripts/data_processing/${label_type}_examples.yaml" \
+            --output "$base_dir/results/multilabel/${model##*/}-annotations/${label_type}/${lang}-parallel.jsonl" \

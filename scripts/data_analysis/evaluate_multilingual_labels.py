@@ -151,23 +151,22 @@ def _read_records(path: Path) -> Iterator[tuple[int, str, list[str], str]]:
                 record = json.loads(line)
                 if not isinstance(record, dict):
                     raise TypeError("record must be a JSON object")
-                doc_id = record.get("doc_id")
-                result = record.get("result")
-                labels = result.get("labels") if isinstance(result, dict) else None
+                doc_id = record.get("id")
+                labels = record.get("labels") if isinstance(record, dict) else None
                 rationale = (
-                    result.get("rationale") if isinstance(result, dict) else None
+                    record.get("label_rationale") if isinstance(record, dict) else None
                 )
                 if not isinstance(doc_id, str) or not doc_id:
-                    raise TypeError("doc_id must be a non-empty string")
+                    raise TypeError("id must be a non-empty string")
                 if (
                     not isinstance(labels, list)
                     or not labels
                     or any(not isinstance(label, str) or not label for label in labels)
                     or len(labels) != len(set(labels))
                 ):
-                    raise TypeError("result.labels must be unique non-empty strings")
+                    raise TypeError("labels must be unique non-empty strings")
                 if not isinstance(rationale, str):
-                    raise TypeError("result.rationale must be a string")
+                    raise TypeError("label_rationale must be a string")
             except (json.JSONDecodeError, TypeError, AttributeError) as exc:
                 raise ValueError(
                     f"Invalid label record in {path}:{line_number}: {exc}"
