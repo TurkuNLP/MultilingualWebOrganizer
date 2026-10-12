@@ -1,0 +1,26 @@
+# configs/roihu/distribution/generate_clef.yaml
+# Label distributions from the Clef decision model (scripts/data_processing/generate_label_clef.py).
+# The counterpart of generate_base.yaml: the launchers pass the dataset config and split,
+# language, label type, label files, and output path on the command line.
+paths:
+  base_dir: /scratch/project_2020507/users/tarkkaot/MultilingualWebOrganizer
+  input_dataset: MultiSynt/MT-Nemotron-CC
+
+model:
+  name: Cloudflare/clef
+  # No revision here: the script defaults to the repository commit whose model code
+  # was reviewed (REVIEWED_REVISION). Set `revision:` only to use another commit.
+  dtype: auto            # Clef's default, bfloat16
+  max_model_len: 16384   # Clef's default context length
+  seed: 0
+  thinking_mode: disabled
+
+run:
+  # Documents read, scored, and saved together.
+  batch_size: 256
+  # Padded tokens (documents x longest document) per forward pass; lower it if the
+  # GPU runs out of memory, raise it if GPU memory is left unused.
+  max_batch_tokens: 32768
+  max_document_tokens: 8192
+  max_documents: 10000
+  log_level: INFO

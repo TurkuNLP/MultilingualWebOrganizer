@@ -19,6 +19,10 @@
 #   sbatch --gres=gpu:gh200:4 --cpus-per-task=288 generate_distribution.sh finnish topic mistralai/Mistral-Medium-3.5-128B
 # The tensor parallel size always equals the number of allocated GPUs.
 #
+# Cloudflare/clef (a decision model) is run with generate_label_clef.py instead; it
+# uses one GPU, no demonstrations, and a fixed label order:
+#   sbatch generate_distribution.sh finnish topic Cloudflare/clef 2000
+#
 # Models to try
 # meta-llama/Llama-3.1-8B-Instruct
 # Qwen/Qwen3.8-27B
@@ -85,16 +89,27 @@ if [[ -n "$max_documents" ]]; then
     max_documents_args=(--max-documents "$max_documents")
 fi
 
+# Chat models are scored through vLLM; Clef has its own script. The per-language
+# config supplies the dataset; its vLLM model settings are overridden for Clef.
+model_args=(--tensor-parallel-size "$tensor_parallel_size" --seed "$seed" --prompt-order rotated)
+if [[ "${model,,}" == cloudflare/clef* ]]; then
+    python_script="$base_dir/scripts/data_processing/generate_label_clef.py"
+    model_args=(--tensor-parallel-size 1 --max-model-len 16384)
+    if (( tensor_parallel_size != 1 )); then
+        echo "Clef runs on one GPU; got $tensor_parallel_size. Submit with the default 1-GPU allocation." >&2
+        exit 1
+    fi
+fi
+
 echo "Job $SLURM_JOB_ID on $(hostname) at $(date)"
 echo "model=$model gpus=$tensor_parallel_size language=$lang label_type=$label_type seed=$seed max_documents=${max_documents:-config}"
+echo "script=${python_script##*/}"
 
 # ${model##*/} drops the organization prefix.
 srun python "$python_script" \
             --config "$base_dir/configs/roihu/distribution/generate_${lang}_multisynt.yaml" \
-            --model "$model" \
-            --tensor-parallel-size "$tensor_parallel_size" \
+            --model-name "$model" \
             --label-type "$label_type" \
-            --seed "$seed" \
-            --prompt-order rotated \
+            ${model_args[@]+"${model_args[@]}"} \
             ${max_documents_args[@]+"${max_documents_args[@]}"} \
             --output "$base_dir/results/distribution/${model##*/}-annotations/${label_type}/${lang}-parallel.jsonl"

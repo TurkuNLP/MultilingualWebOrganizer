@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:gh200:1
 #SBATCH -o ../../logs/distribution_%A_%a.out
 #SBATCH -e ../../logs/distribution_%A_%a.err
-#SBATCH --array=0%6
+#SBATCH --array=0-11%6
 
 # How to run on Roihu (submit from this directory so relative log paths resolve):
 #   cd /scratch/project_2020507/users/tarkkaot/MultilingualWebOrganizer/hpc/roihu
@@ -33,6 +33,12 @@
 # (the script stops with an error); leave those tasks out of --array, e.g. task 0
 # for models whose English topic results already exist.
 # The "%6" limit allows at most 6 tasks to run concurrently.
+#
+# Cloudflare/clef is a decision model, not a chat model: it is run with
+# generate_label_clef.py and configs/roihu/distribution/generate_clef.yaml instead.
+# It fits on one GH200, takes no demonstrations, and always presents the labels in
+# the same (alphabetical) order, so --prompt-order and the per-language seed don't apply:
+#   sbatch array_generate_distribution.sh Cloudflare/clef 2000
 #
 # Output: results/distribution/<model>-annotations/{topic,format}/<language>-parallel.jsonl
 
@@ -84,23 +90,35 @@ if [[ -n "$max_documents" ]]; then
     max_documents_args=(--max-documents "$max_documents")
 fi
 
+# Chat models are scored through vLLM; Clef has its own script and config.
+config="$base_dir/configs/roihu/distribution/generate_base.yaml"
+model_args=(--tensor-parallel-size "$tensor_parallel_size" --seed "$seed" --prompt-order rotated)
+if [[ "${model,,}" == cloudflare/clef* ]]; then
+    python_script="$base_dir/scripts/data_processing/generate_label_clef.py"
+    config="$base_dir/configs/roihu/distribution/generate_clef.yaml"
+    model_args=()
+    if (( tensor_parallel_size != 1 )); then
+        echo "Clef runs on one GPU; got $tensor_parallel_size. Submit with the default 1-GPU allocation." >&2
+        exit 1
+    fi
+fi
+
 echo "Job ${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID} on $(hostname) at $(date)"
 echo "model=$model gpus=$tensor_parallel_size language=$language label_type=$label_type seed=$seed max_documents=${max_documents:-config}"
+echo "script=${python_script##*/} config=${config##*/}"
 
 # The distribution script checks at startup that the answer letters are single
 # tokens for the chosen model and stops with an error if they are not.
 # ${model##*/} drops the organization prefix, e.g. Qwen3.8-27B.
 srun python "$python_script" \
-    --config "$base_dir/configs/roihu/distribution/generate_base.yaml" \
-    --model "$model" \
-    --tensor-parallel-size "$tensor_parallel_size" \
+    --config "$config" \
+    --model-name "$model" \
     --dataset-config "$dataset_config" \
     --dataset-split "$dataset_split" \
     --language "$language" \
-    --seed "$seed" \
     --label-type "$label_type" \
     --labels "$base_dir/scripts/data_processing/${label_type}s.yaml" \
     --examples "$base_dir/scripts/data_processing/${label_type}_examples.yaml" \
-    --prompt-order rotated \
+    ${model_args[@]+"${model_args[@]}"} \
     ${max_documents_args[@]+"${max_documents_args[@]}"} \
     --output "$base_dir/results/distribution/${model##*/}-annotations/${label_type}/${language}-parallel.jsonl"

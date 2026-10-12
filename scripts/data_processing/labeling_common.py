@@ -1,9 +1,10 @@
 """Shared resources for the LLM labeling pipelines.
 
-Used by ``generate_multilabel.py`` (structured multi-label output) and
-``generate_label_distributions.py`` (label probability distributions). Keeping
+Used by ``generate_multilabel.py`` (structured multi-label output),
+``generate_label_distributions.py`` (label probability distributions), and
+``generate_label_clef.py`` (label distributions from the Clef decision model). Keeping
 input loading, label resources, prompt shuffling, result storage, batching,
-and configuration handling here ensures both pipelines process documents the
+and configuration handling here ensures the pipelines process documents the
 same way, which keeps their outputs comparable.
 """
 
@@ -763,6 +764,7 @@ def load_cli_config(
     *,
     extra_run_keys: Mapping[str, str] | None = None,
     unsupported_run_keys: Mapping[str, str] | None = None,
+    extra_model_keys: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Load the supported nested YAML configuration structure.
 
@@ -776,6 +778,8 @@ def load_cli_config(
             destinations.
         unsupported_run_keys: ``run`` keys to reject, mapped to the reason
             shown in the error message.
+        extra_model_keys: Pipeline-specific ``model`` keys mapped to their
+            argparse destinations.
 
     Returns:
         Flat mapping from argparse destination names to configured values.
@@ -792,6 +796,7 @@ def load_cli_config(
         section: dict(keys) for section, keys in CONFIG_DESTINATIONS.items()
     }
     destinations["run"].update(extra_run_keys or {})
+    destinations["model"].update(extra_model_keys or {})
     unknown = set(raw) - set(destinations)
     if unknown:
         raise ValueError(f"Unknown config sections: {sorted(unknown)}")
@@ -847,6 +852,7 @@ def parse_cli_and_config(
     extra_defaults: Mapping[str, Any] | None = None,
     extra_run_keys: Mapping[str, str] | None = None,
     unsupported_run_keys: Mapping[str, str] | None = None,
+    extra_model_keys: Mapping[str, str] | None = None,
 ) -> argparse.Namespace:
     """Parse YAML defaults first, then let explicit CLI values override them.
 
@@ -860,6 +866,7 @@ def parse_cli_and_config(
         extra_defaults: Defaults for pipeline-specific arguments.
         extra_run_keys: Pipeline-specific ``run`` config keys.
         unsupported_run_keys: ``run`` config keys to reject with a reason.
+        extra_model_keys: Pipeline-specific ``model`` config keys.
 
     Returns:
         The merged and validated arguments.
@@ -871,6 +878,7 @@ def parse_cli_and_config(
                 preliminary.config,
                 extra_run_keys=extra_run_keys,
                 unsupported_run_keys=unsupported_run_keys,
+                extra_model_keys=extra_model_keys,
             )
         )
     args = parser.parse_args(argv)
