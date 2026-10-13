@@ -93,8 +93,21 @@ class InputDocument(BaseModel):
 
 
 def document_url(document: InputDocument) -> str | None:
-    """Return the document URL from its extra fields, or ``None`` if absent."""
-    url = document.model_extra.get("url", "") if document.model_extra else None
+    """Return the document URL from its extra fields, or ``None`` if absent.
+
+    The URL is read from ``url`` or ``u``; HPLT records hold it in ``u``.
+
+    Raises:
+        ValueError: If the document has both fields.
+    """
+    extra = document.model_extra or {}
+    provided = [field for field in ("url", "u") if field in extra]
+    if len(provided) > 1:
+        raise ValueError(
+            f"Document {document.doc_id!r}: exactly one URL field is allowed; found: "
+            f"{', '.join(provided)}"
+        )
+    url = extra[provided[0]] if provided else None
     return str(url) if url else None
 
 
