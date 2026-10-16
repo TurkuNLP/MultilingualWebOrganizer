@@ -40,6 +40,7 @@ SEARCHABLE_ARGUMENTS = frozenset(
         "weight_decay",
         "warmup_steps",
         "num_train_epochs",
+        "max_steps",
         "per_device_train_batch_size",
         "gradient_accumulation_steps",
         "max_grad_norm",
@@ -122,6 +123,8 @@ def load_search_space(path: Path) -> list[SearchDimension]:
         if distribution == "int_uniform" and not (float(low).is_integer() and float(high).is_integer()):
             raise ValueError(f"{where}: 'int_uniform' needs integer bounds")
         space.append(SearchDimension(name, distribution, float(low), float(high)))
+    if {"num_train_epochs", "max_steps"} <= {dim.name for dim in space}:
+        raise ValueError(f"{path}: search num_train_epochs or max_steps, not both (max_steps overrides epochs)")
     return space
 
 

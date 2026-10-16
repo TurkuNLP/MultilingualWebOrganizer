@@ -20,7 +20,7 @@ import hp_search  # sibling module: the script's directory is on sys.path
 LOGGER = logging.getLogger(__name__)
 # Fields that must be the same in every trial of one search.
 SEARCH_FIELDS = ("search_space", "search_seed", "dataset_path", "metric", "greater_is_better",
-                 "max_train_samples", "max_eval_samples")
+                 "template", "decode_url", "max_train_samples", "max_eval_samples", "max_train_documents")
 
 
 def load_trials(search_dir: Path) -> list[dict[str, Any]]:
@@ -41,6 +41,14 @@ def load_trials(search_dir: Path) -> list[dict[str, Any]]:
         values = {repr(trial.get(name)) for trial in trials}
         if len(values) > 1:
             raise ValueError(f"Trials in {search_dir} differ in {name}: {sorted(values)}; they aren't one search")
+    # A fixed --max_steps must match. A searched one differs by design, and so does one
+    # derived from a document budget (it depends on each trial's batch size).
+    fixed_steps = {
+        repr(trial.get("max_steps")) for trial in trials
+        if "max_steps" not in trial["params"] and not trial.get("max_train_documents")
+    }
+    if len(fixed_steps) > 1:
+        raise ValueError(f"Trials in {search_dir} differ in --max_steps: {sorted(fixed_steps)}; they aren't one search")
     return trials
 
 
@@ -79,21 +87,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     summary_path = args.search_dir / "summary.tsv"
     with summary_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t")
-        writer.writerow(["rank", "trial", objective, "best_epoch", "train_runtime_s", *param_names])
+        writer.writerow(["rank", "trial", objective, "best_step", "best_epoch", "train_steps",
+                         "effective_batch_size", "train_runtime_s", *param_names])
         for rank, trial in enumerate(complete, start=1):
-            writer.writerow([rank, trial["trial"], trial["best_value"], trial["best_epoch"], trial["train_runtime"],
+            # train_steps and effective_batch_size are missing from trials run before they were recorded.
+            writer.writerow([rank, trial["trial"], trial["best_value"], trial.get("best_step"), trial["best_epoch"],
+                             trial.get("train_steps"), trial.get("effective_batch_size"), trial["train_runtime"],
                              *(trial["params"].get(name) for name in param_names)])
     LOGGER.info("Wrote %s", summary_path)
 
     direction = "higher" if greater_is_better else "lower"
     print(f"{len(complete)} completed trials, {len(unfinished)} unfinished; {objective} ({direction} is better)")
-    print(f"{'rank':>4} {'trial':>5} {objective:>24} {'epoch':>5}  parameters")
+    print(f"{'rank':>4} {'trial':>5} {objective:>24} {'step':>7} {'epoch':>6}  parameters")
     for rank, trial in enumerate(complete[: args.top], start=1):
         params = ", ".join(f"{name}={value}" for name, value in trial["params"].items())
-        print(f"{rank:>4} {trial['trial']:>5} {trial['best_value']:>24.5f} {trial['best_epoch']:>5}  {params}")
+        print(f"{rank:>4} {trial['trial']:>5} {trial['best_value']:>24.5f} {trial.get('best_step')!s:>7} "
+              f"{trial['best_epoch']:>6.2f}  {params}")
     best = complete[0]
-    print(f"\nBest trial {best['trial']} (best at epoch {best['best_epoch']}). Flags for the final training run:")
+    print(f"\nBest trial {best['trial']} (best at step {best.get('best_step')}, epoch {best['best_epoch']:.2f} "
+          f"of {best.get('train_steps')} steps). Flags for the final training run:")
     print(as_flags(best["params"]))
+    if best.get("max_train_documents"):
+        print(f"(Each trial trained on {best['max_train_documents']} documents; set the final run's length with "
+              "TRAIN_DOCUMENTS.)")
+    elif best.get("max_steps", -1) > 0 and "max_steps" not in best["params"]:
+        print(f"(The trials trained for --max_steps {best['max_steps']}; pass the final run's length as --max_steps.)")
     if best.get("max_train_samples"):
         print(f"(The trials trained on {best['max_train_samples']} documents; the final run uses all of them.)")
     return 0

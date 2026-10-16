@@ -2,28 +2,51 @@
 
 The inputs are the JSONL files written by
 ``scripts/data_processing/generate_label_distributions.py``: one record per document
-with its text and a probability per label (``label_probs``, keyed by label short name).
-Each record becomes one row with the document ID, its language, its text, and a
-``labels`` vector of probabilities in label-file order, the training target of
-``finetune.py``.
+with its text, the URL shown in the prompt, and a probability per label
+(``label_probs``, keyed by label short name). Each record becomes one row with the
+document ID, its language, its URL, its text, and a ``labels`` vector of probabilities
+in label-file order, the training target of ``finetune.py``. The language is the file
+name up to the first hyphen (``finnish.jsonl`` and ``finnish-parallel.jsonl`` are both
+``finnish``).
 
-Splits are made by document ID, not by row: the parallel files hold translations of
-the same documents under the same ID, and a random row split would put translations
-of a test document into the training set. Every ID is assigned to a split by a seeded
-hash, so all language versions of a document land in the same split, and the
-assignment doesn't depend on file order or on which files are included.
+The URL is stored unchanged, or as null when the labelling run had none for the
+document. ``finetune.py`` then uses WebOrganizer's ``{url}\\n\\n{text}`` input by
+default. Records written before URLs were stored (no ``url`` key at all) raise an
+error; ``backfill_result_urls.py`` adds them. With ``--no_url`` the dataset has no
+``url`` column, the records' URLs are ignored (and may be absent), and ``finetune.py``
+trains on the text alone, like WebOrganizer's ``-NoURL`` classifiers.
+
+Splits are made by document ID, not by row: the parallel (translated) files hold the
+same documents under the same ID in every language, and a random row split would put
+translations of a test document into the training set. Every ID is assigned to a split
+by a seeded hash, so all language versions of a document land in the same split, and
+the assignment doesn't depend on file order or on which files are included. For native
+data such as the HPLT samples, whose documents differ between languages, the hash is
+simply a reproducible random split of each language.
+
+Rows are stored in input order: one block per language (files in name order), each in
+file order. Training doesn't depend on that order: ``finetune.py``'s length-grouped
+sampler draws a new random permutation of the whole training split every epoch, and
+``--max_train_samples`` takes a seeded random subset.
 
 The input is streamed into memory-mapped Arrow files, so multi-gigabyte inputs don't
 have to fit in memory. Malformed records raise an error instead of being skipped.
 
 Outputs (in ``--output_dir``): a ``datasets.DatasetDict`` saved with
 ``save_to_disk`` (splits ``train``, ``validation``, ``test``), ``labels.json`` with
-the label names in target order, and ``README.md`` describing how the data was made.
+the label names in target order, ``README.md`` describing how the data was made (split
+sizes, documents per language, and the label distribution of every split), and
+``label_counts.tsv`` with the label distribution per split and language.
+
+In the label statistics, a document's top label is its highest-probability label (the
+first in label order on a tie, as in ``finetune.py``'s accuracy). Its soft count adds
+up its probabilities, so a label's soft share is its share of the training targets.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime
 import hashlib
 import json
@@ -31,12 +54,14 @@ import logging
 import math
 import shutil
 import tempfile
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import datasets
+import numpy as np
 import yaml  # type: ignore
 
 LOGGER = logging.getLogger(__name__)
@@ -146,12 +171,33 @@ def label_vector(record: dict[str, Any], label_names: Sequence[str], where: str)
     return vector
 
 
+def record_url(record: dict[str, Any], where: str) -> str | None:
+    """Return a record's URL, or None if the labelling run had no URL for the document.
+
+    Raises:
+        ValueError: If the record has no ``url`` key (written before URLs were stored)
+            or the URL is not a non-empty string or null.
+    """
+    if "url" not in record:
+        raise ValueError(
+            f"{where}: record without a 'url' field; it predates URL storage, "
+            "add the URLs with scripts/data_processing/backfill_result_urls.py"
+        )
+    url = record["url"]
+    if url is None:
+        return None
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError(f"{where}: invalid URL {url!r}; expected a non-empty string or null")
+    return url
+
+
 def generate_rows(
     files: Sequence[str],
     label_names: Sequence[str],
     seed: int,
     train_ratio: float,
     val_ratio: float,
+    include_url: bool,
 ) -> Iterator[dict[str, Any]]:
     """Stream validated rows, each tagged with its split, from the input files.
 
@@ -161,6 +207,7 @@ def generate_rows(
         seed: Seed of the split hash.
         train_ratio: Share of document IDs assigned to ``train``.
         val_ratio: Share of document IDs assigned to ``validation``.
+        include_url: Add a ``url`` column (and require a ``url`` field in every record).
 
     Raises:
         ValueError: If a record is malformed or a document ID repeats within a language.
@@ -183,13 +230,91 @@ def generate_rows(
                 if (language, doc_id) in seen:
                     raise ValueError(f"{where}: duplicate document {doc_id!r} for language {language!r}")
                 seen.add((language, doc_id))
+                row = {"id": doc_id, "language": language}
+                if include_url:
+                    row["url"] = record_url(record, where)
                 yield {
-                    "id": doc_id,
-                    "language": language,
+                    **row,
                     "text": text,
                     "labels": label_vector(record, label_names, where),
                     "split": split_of(doc_id, seed, train_ratio, val_ratio),
                 }
+
+
+@dataclass
+class SplitStatistics:
+    """Document and label counts of one split, per language.
+
+    Attributes:
+        num_labels: Number of labels.
+        documents: Documents per language.
+        top_label: Per language, the number of documents whose top label is each
+            label (an array in label order).
+        soft: Per language, the summed probability of each label (an array in label
+            order); divided by the documents, it is the label's mean probability.
+    """
+
+    num_labels: int
+    documents: Counter[str]
+    top_label: dict[str, np.ndarray]
+    soft: dict[str, np.ndarray]
+
+    @property
+    def total(self) -> int:
+        """Number of documents in the split."""
+        return sum(self.documents.values())
+
+    def top_label_total(self) -> np.ndarray:
+        """Top-label counts over all languages, in label order."""
+        return np.sum([*self.top_label.values(), np.zeros(self.num_labels, dtype=np.int64)], axis=0)
+
+    def soft_total(self) -> np.ndarray:
+        """Summed probabilities over all languages, in label order."""
+        return np.sum([*self.soft.values(), np.zeros(self.num_labels)], axis=0)
+
+
+def split_statistics(dataset: datasets.Dataset, num_labels: int, batch_size: int = 10_000) -> SplitStatistics:
+    """Count documents, top labels, and summed label probabilities per language.
+
+    The split is read in batches from its Arrow files, so memory use doesn't grow with
+    the dataset. A document's top label is ``argmax`` of its probabilities (the first
+    label in label order on a tie, as in ``finetune.py``).
+
+    Raises:
+        ValueError: If a label vector doesn't have ``num_labels`` entries.
+    """
+    documents: Counter[str] = Counter()
+    top_label: dict[str, np.ndarray] = defaultdict(lambda: np.zeros(num_labels, dtype=np.int64))
+    soft: dict[str, np.ndarray] = defaultdict(lambda: np.zeros(num_labels, dtype=np.float64))
+    columns = dataset.select_columns(["language", "labels"]).with_format("numpy")
+    for batch in columns.iter(batch_size=batch_size):
+        probabilities = np.asarray(batch["labels"], dtype=np.float64)
+        if probabilities.ndim != 2 or probabilities.shape[1] != num_labels:
+            raise ValueError(f"Expected label vectors of length {num_labels}, got shape {probabilities.shape}")
+        languages = np.asarray(batch["language"])
+        top = probabilities.argmax(axis=1)
+        for language in np.unique(languages):
+            mask = languages == language
+            documents[str(language)] += int(mask.sum())
+            top_label[str(language)] += np.bincount(top[mask], minlength=num_labels)
+            soft[str(language)] += probabilities[mask].sum(axis=0)
+    return SplitStatistics(num_labels, documents, dict(top_label), dict(soft))
+
+
+def write_label_counts(path: Path, statistics: dict[str, SplitStatistics], label_names: Sequence[str]) -> None:
+    """Write the label distribution per split, language, and label as a TSV file.
+
+    Columns: split, language, label, documents (in that split and language),
+    top_label_documents, and probability_sum (the label's soft count).
+    """
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(["split", "language", "label", "documents", "top_label_documents", "probability_sum"])
+        for split, stats in statistics.items():
+            for language in sorted(stats.documents):
+                for index, label in enumerate(label_names):
+                    writer.writerow([split, language, label, stats.documents[language],
+                                     int(stats.top_label[language][index]), f"{stats.soft[language][index]:.4f}"])
 
 
 def make_readme(
@@ -197,16 +322,60 @@ def make_readme(
     files: Sequence[Path],
     labels_path: Path,
     label_names: Sequence[str],
-    counts: dict[str, Counter[str]],
+    statistics: dict[str, SplitStatistics],
+    missing_urls: dict[str, int] | None,
 ) -> str:
-    """Describe how the dataset was made, with row counts per split and language."""
-    languages = sorted({language for split_counts in counts.values() for language in split_counts})
-    count_rows = "\n".join(
-        f"| {split} | " + " | ".join(str(counts[split][language]) for language in languages)
-        + f" | {sum(counts[split].values())} |"
+    """Describe how the dataset was made: inputs, labels, URLs, split sizes, and label distribution.
+
+    ``missing_urls`` counts the rows without a URL per split, or is None for a dataset
+    made with ``--no_url``.
+    """
+    totals = {split: statistics[split].total for split in SPLITS}
+    all_documents = sum(totals.values())
+    ratios = {"train": args.train_ratio, "validation": args.val_ratio, "test": args.test_ratio}
+    size_rows = "\n".join(
+        f"| {split} | {totals[split]:,} | {totals[split] / all_documents:.1%} | {ratios[split]:.0%} |"
         for split in SPLITS
     )
+    size_rows += f"\n| **Total** | **{all_documents:,}** | 100.0% | |"
+
+    languages = sorted({language for stats in statistics.values() for language in stats.documents})
+    language_rows = "\n".join(
+        f"| {language} | " + " | ".join(f"{statistics[split].documents[language]:,}" for split in SPLITS)
+        + f" | {sum(statistics[split].documents[language] for split in SPLITS):,} |"
+        for language in languages
+    )
+    language_rows += "\n| **Total** | " + " | ".join(f"**{totals[split]:,}**" for split in SPLITS) + \
+        f" | **{all_documents:,}** |"
+
+    top = {split: statistics[split].top_label_total() for split in SPLITS}
+    soft_train = statistics["train"].soft_total()
+
+    def share(count: float, total: int) -> str:
+        return f"{count / total:.1%}" if total else "n/a"
+
+    label_rows = "\n".join(
+        f"| {label} | "
+        + " | ".join(f"{int(top[split][index]):,} | {share(top[split][index], totals[split])}" for split in SPLITS)
+        + f" | {share(soft_train[index], totals['train'])} |"
+        for index, label in enumerate(label_names)
+    )
+    label_rows += "\n| **Total** | " + " | ".join(
+        f"**{totals[split]:,}** | {share(totals[split], totals[split])}" for split in SPLITS
+    ) + f" | {share(soft_train.sum(), totals['train'])} |"
+
     input_list = "\n".join(f"- {file}" for file in files)
+    if missing_urls is None:
+        url_text = (
+            "The dataset was made with `--no_url`: it has no `url` column, and `finetune.py`\n"
+            "trains on the text alone by default."
+        )
+    else:
+        url_text = (
+            "The `url` column holds the URL shown to the labelling model, unchanged, or null if\n"
+            f"there was none. Rows without a URL: {', '.join(f'{split} {missing_urls[split]}' for split in SPLITS)}.\n"
+            "`finetune.py` uses the URL and the text by default; `--template` changes that."
+        )
     return f"""# Soft-label classification dataset
 
 Created on {datetime.datetime.now().strftime("%Y-%m-%d")} by `scripts/model_training/create_datasets.py`.
@@ -222,15 +391,39 @@ Label type: {args.label_type}. Labels file: `{labels_path}`.
 Each row's `labels` column holds the label probabilities from the distribution run, in
 this order (also in `labels.json`): {", ".join(label_names)}.
 
+## URLs
+
+{url_text}
+
 ## Splits
 
 Document IDs are assigned to splits by a seeded hash (seed {args.seed}), so all language
-versions of a document are in the same split. Requested ratios: train {args.train_ratio},
-validation {args.val_ratio}, test {args.test_ratio}.
+versions of a document are in the same split. The realized shares are close to, but
+not exactly, the requested ratios.
 
-| Split | {" | ".join(languages)} | Total |
-|---|{"---|" * len(languages)}---|
-{count_rows}
+| Split | Documents | Share | Requested |
+|---|---:|---:|---:|
+{size_rows}
+
+### Documents per language
+
+| Language | train | validation | test | Total |
+|---|---:|---:|---:|---:|
+{language_rows}
+
+## Label distribution
+
+For each split, the number and share of documents whose **top label** (highest
+probability; the first in label order on a tie) is each label. The last column is the
+label's **soft share** in the training split: its mean probability over the training
+documents, i.e. its share of the soft targets the classifier is trained on. Where the
+two differ, the LLM was uncertain: the soft share is higher for labels it often gives as
+a second choice, and lower for labels it picks with low confidence. Counts per language
+are in `label_counts.tsv`.
+
+| Label | train | % | validation | % | test | % | train soft share |
+|---|---:|---:|---:|---:|---:|---:|---:|
+{label_rows}
 """
 
 
@@ -258,6 +451,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--overwrite",
         action="store_true",
         help="Replace an existing dataset in the output directory.",
+    )
+    parser.add_argument(
+        "--no_url",
+        action="store_true",
+        help="Leave the URL out of the dataset (no url column), for a text-only classifier. "
+        "Records then needn't have a url field.",
     )
     parser.add_argument("--train_ratio", type=float, default=0.8, help="Ratio of training data.")
     parser.add_argument("--val_ratio", type=float, default=0.1, help="Ratio of validation data.")
@@ -304,10 +503,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         LOGGER.info("Input %s (language %s)", file, language_of(file))
     LOGGER.info("%d labels from %s", len(label_names), labels_path)
 
+    include_url = not args.no_url
+    LOGGER.info("URL column: %s", "yes" if include_url else "no (--no_url)")
+    columns = {"id": datasets.Value("string"), "language": datasets.Value("string")}
+    if include_url:
+        columns["url"] = datasets.Value("string")  # null when the document has no URL
     features = datasets.Features(
         {
-            "id": datasets.Value("string"),
-            "language": datasets.Value("string"),
+            **columns,
             "text": datasets.Value("string"),
             "labels": datasets.List(datasets.Value("float32"), length=len(label_names)),
             "split": datasets.Value("string"),
@@ -329,6 +532,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "seed": args.seed,
                 "train_ratio": args.train_ratio,
                 "val_ratio": args.val_ratio,
+                "include_url": include_url,
             },
         )
         dataset_dict = datasets.DatasetDict(
@@ -343,11 +547,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
         )
         ratios = {"train": args.train_ratio, "validation": args.val_ratio, "test": args.test_ratio}
-        counts = {split: Counter(dataset_dict[split]["language"]) for split in SPLITS}
+        statistics = {split: split_statistics(dataset_dict[split], len(label_names)) for split in SPLITS}
+        missing_urls = (
+            {split: sum(url is None for url in dataset_dict[split]["url"]) for split in SPLITS}
+            if include_url
+            else None
+        )
         for split in SPLITS:
-            LOGGER.info("%s: %d rows %s", split, len(dataset_dict[split]), dict(sorted(counts[split].items())))
+            LOGGER.info("%s: %d rows %s", split, len(dataset_dict[split]),
+                        dict(sorted(statistics[split].documents.items())))
+            if missing_urls is not None and missing_urls[split]:
+                LOGGER.warning("%s: %d rows have no URL", split, missing_urls[split])
             if ratios[split] > 0 and not len(dataset_dict[split]):
                 raise ValueError(f"The {split} split is empty; the input has too few documents")
+            if statistics[split].total != len(dataset_dict[split]):
+                raise ValueError(f"The {split} statistics count {statistics[split].total} rows, not "
+                                 f"{len(dataset_dict[split])}")
+        never_top = [name for name, count in zip(label_names, statistics["train"].top_label_total()) if count == 0]
+        if never_top:
+            LOGGER.warning("Labels that are never the top label in the training split: %s", ", ".join(never_top))
 
         if output_dir.exists() and args.overwrite:
             shutil.rmtree(output_dir)
@@ -364,7 +582,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         + "\n",
         encoding="utf-8",
     )
-    (output_dir / "README.md").write_text(make_readme(args, files, labels_path, label_names, counts), encoding="utf-8")
+    write_label_counts(output_dir / "label_counts.tsv", statistics, label_names)
+    (output_dir / "README.md").write_text(
+        make_readme(args, files, labels_path, label_names, statistics, missing_urls), encoding="utf-8"
+    )
     LOGGER.info("Saved the dataset to %s", output_dir)
     return 0
 

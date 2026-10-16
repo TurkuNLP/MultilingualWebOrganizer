@@ -1,6 +1,8 @@
 """Fine-tune a classifier on soft topic or format labels from the label distribution runs.
 
-Adapted from WebOrganizer's classifier training script (``weborganizer_classifier.py``):
+Adapted from WebOrganizer's classifier training script
+(``https://github.com/CodeCreator/WebOrganizer/blob/main/define_domains/train_classifier.py``):
+
 the model is trained with cross-entropy against each document's label distribution,
 not against a single hard label. The input is a dataset made by ``create_datasets.py``
 (``train``/``validation``/``test`` splits with a ``labels`` probability vector per
@@ -23,6 +25,16 @@ Changes from the WebOrganizer script:
 * The label temperature applies to the training loss only; evaluation always compares
   with the original label distributions, so runs with different temperatures are
   comparable.
+* The input is built from dataset columns with ``--template``, as in WebOrganizer.
+  By default it is the URL and the text (``{url}\\n\\n{text}``, WebOrganizer's default
+  classifiers) if the dataset has a ``url`` column, otherwise the text alone (datasets
+  made with ``create_datasets.py --no_url``). URLs are percent-decoded first
+  (``--decode_url``), so non-Latin URLs show words, not ``%XX`` byte codes.
+  Template and decoding are saved in the model config (``input_template``,
+  ``decode_url``) so inference can rebuild the same input with ``render_input``.
+* Training length can be a number of documents (``--max_train_documents``): the
+  number of optimizer steps is that divided by the effective batch size, so runs and
+  search trials with different batch sizes see the same amount of data.
 * Hyperparameter search: with ``--hp_search_space`` and ``--hp_trial``, the run is one
   trial of a seeded random search (see ``hp_search.py``), trained on the training
   split and scored on the validation split; ``summarize_hp_search.py`` ranks trials.
@@ -45,12 +57,14 @@ import functools
 import json
 import logging
 import math
+import string
 import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import datasets
 import numpy as np
@@ -95,6 +109,10 @@ SUMMARY_METRICS = (
     "brier_score",
 )
 
+# Default inputs: URL and text as in WebOrganizer's default classifiers, or text alone.
+URL_TEMPLATE = "{url}\n\n{text}"
+TEXT_TEMPLATE = "{text}"
+
 # Metrics where lower values are better; a wrong direction would keep the worst checkpoint.
 LOWER_IS_BETTER_MARKERS = ("loss", "divergence", "brier")
 
@@ -136,7 +154,20 @@ class ScriptArguments(TrainingArguments):
         metadata={"help": "Field name for labels. Supply back-off labels with multiple"},
     )
 
-    template: str = field(default="{text}", metadata={"help": "Template for the text input"})
+    template: str | None = field(
+        default=None,
+        metadata={
+            "help": "Template for the text input, filled with dataset columns, e.g. '{text}' or "
+            "$'{url}\\n\\n{text}' in bash. Default: the latter if the dataset has a url column, else '{text}'"
+        },
+    )
+    decode_url: bool = field(
+        default=True,
+        metadata={
+            "help": "Percent-decode the url column before filling the template ('lukum%C3%A4%C3%A4r%C3%A4' -> "
+            "'lukumäärä'); URLs that aren't UTF-8 percent-encoding are used as they are"
+        },
+    )
 
     label_temperature: float = field(
         default=1.0,
@@ -152,7 +183,7 @@ class ScriptArguments(TrainingArguments):
         default=None,
         metadata={
             "help": "Pooling of the classification head for models that support it (ModernBERT/mmBERT): "
-            "'cls' or 'mean'. Default: the model's own setting ('cls' for mmBERT).",
+            "'cls' or 'mean'. Default: the model's own setting ('mean' for mmBERT-base).",
             "choices": ["cls", "mean"],
         },
     )
@@ -170,6 +201,14 @@ class ScriptArguments(TrainingArguments):
     max_train_samples: int | None = field(
         default=None,
         metadata={"help": "Train on a seeded random subset of this many documents (e.g. for cheaper trials)"},
+    )
+    max_train_documents: int | None = field(
+        default=None,
+        metadata={
+            "help": "Train on this many documents in total: max_steps becomes this divided by the effective batch "
+            "size (rounded up), so runs with different batch sizes see the same data. Replaces "
+            "--max_steps and --num_train_epochs"
+        },
     )
     max_eval_samples: int | None = field(
         default=None,
@@ -220,7 +259,11 @@ class ScriptArguments(TrainingArguments):
             raise ValueError("--max_length must be positive")
         if not self.label_field:
             raise ValueError("--label_field needs at least one field name")
-        for name in ("max_train_samples", "max_eval_samples"):
+        if self.template is not None:
+            template_fields(self.template)  # raises on a malformed template
+        if self.max_train_documents is not None and self.max_steps > 0:
+            raise ValueError("Give --max_train_documents or --max_steps, not both")
+        for name in ("max_train_samples", "max_eval_samples", "max_train_documents"):
             if getattr(self, name) is not None and getattr(self, name) < 1:
                 raise ValueError(f"--{name} must be positive")
         if (self.hp_search_space is None) != (self.hp_trial is None):
@@ -329,6 +372,79 @@ def get_labels(item: dict[str, Any], label_fields: Sequence[str]) -> Any:
         if item.get(label_field) is not None:
             return item[label_field]
     raise KeyError(f"Item has none of the label fields {list(label_fields)}; its fields are {sorted(item)}")
+
+
+@functools.lru_cache(maxsize=None)
+def template_fields(template: str) -> frozenset[str]:
+    """Return the column names a ``str.format`` input template uses.
+
+    Raises:
+        ValueError: If the template is malformed, uses no field, or uses positional
+            fields or attribute/index access (only plain ``{column}`` is supported).
+    """
+    try:
+        parsed = list(string.Formatter().parse(template))
+    except ValueError as error:
+        raise ValueError(f"Malformed --template {template!r}: {error}") from error
+    names = {name for _, name, _, _ in parsed if name is not None}
+    invalid = sorted(name for name in names if not name.isidentifier())
+    if invalid:
+        raise ValueError(f"--template {template!r} may only use plain column names like {{text}}, not {invalid}")
+    if not names:
+        raise ValueError(f"--template {template!r} uses no column")
+    return frozenset(names)
+
+
+def default_template(dataset: datasets.DatasetDict) -> str:
+    """Return the input template for a dataset: URL and text if it has URLs, else text.
+
+    Raises:
+        ValueError: If some splits have a ``url`` column and others don't.
+    """
+    has_url = {split: "url" in dataset[split].column_names for split in dataset}
+    if len(set(has_url.values())) > 1:
+        raise ValueError(f"Only some splits have a url column: {has_url}; recreate the dataset")
+    return URL_TEMPLATE if all(has_url.values()) else TEXT_TEMPLATE
+
+
+def readable_url(url: str) -> str:
+    """Percent-decode a URL as UTF-8, or return it unchanged if it isn't valid UTF-8.
+
+    Decoding turns e.g. ``%D0%BD%D0%BE%D0%B2%D0%B8`` into ``нови``, which the
+    tokenizer splits into a few word pieces instead of many byte-code pieces. A few
+    URLs encode another charset (e.g. Latin-1 ``%E4``); those keep their escapes.
+    """
+    try:
+        return unquote(url, errors="strict")
+    except UnicodeDecodeError:
+        return url
+
+
+def render_input(row: dict[str, Any], template: str, decode_url: bool) -> str:
+    """Build a document's model input from its dataset columns.
+
+    Inference must use the same function, template, and ``decode_url`` as training;
+    both are saved in the model config as ``input_template`` and ``decode_url``.
+
+    Args:
+        row: The document's columns (at least those the template uses).
+        template: ``str.format`` template, e.g. ``"{url}\\n\\n{text}"``.
+        decode_url: Percent-decode the ``url`` column with ``readable_url``.
+
+    Raises:
+        KeyError: If the row lacks a column the template uses.
+        ValueError: If a column the template uses is null, e.g. a document without
+            a URL under a template with ``{url}``.
+    """
+    values = {}
+    for name in template_fields(template):
+        value = row[name]
+        if value is None:
+            raise ValueError(f"Document {row.get('id')!r} has no {name!r}, which --template {template!r} uses")
+        if name == "url" and decode_url:
+            value = readable_url(value)
+        values[name] = value
+    return template.format(**values)
 
 
 def soft_label_matrix(rows: Sequence[Any], num_labels: int) -> np.ndarray:
@@ -548,15 +664,21 @@ def tokenize_split(
     label_columns = [name for name in args.label_field if name in dataset.column_names]
     if not label_columns:
         raise ValueError(f"Split {description!r} has none of the label fields {args.label_field}")
+    missing = sorted(template_fields(args.template) - set(dataset.column_names))
+    if missing:
+        raise ValueError(
+            f"--template {args.template!r} uses columns {missing} that split {description!r} lacks; "
+            f"it has {dataset.column_names} (datasets made before URLs were stored have no 'url')"
+        )
 
     # Local copies: the map cache key hashes what the function uses, and the full
     # arguments differ between runs (output directory, logging, ...).
-    template, max_length = args.template, args.max_length
+    template, max_length, decode_url = args.template, args.max_length, args.decode_url
 
     def tokenize(batch: dict[str, list[Any]]) -> dict[str, list[Any]]:
         rows = [dict(zip(batch, values)) for values in zip(*batch.values())]
         encoded = tokenizer(
-            [template.format(**row) for row in rows],
+            [render_input(row, template, decode_url) for row in rows],
             truncation=True,
             max_length=max_length,
             return_attention_mask=False,
@@ -627,6 +749,26 @@ def subsample(dataset: datasets.Dataset, limit: int | None, seed: int, descripti
     return dataset.shuffle(seed=seed).select(range(limit))
 
 
+def effective_batch_size(args: ScriptArguments) -> int:
+    """Return the number of documents per optimizer step, over all processes."""
+    return args.per_device_train_batch_size * args.gradient_accumulation_steps * args.world_size
+
+
+def apply_document_budget(args: ScriptArguments) -> None:
+    """Set ``max_steps`` from ``--max_train_documents`` and the effective batch size.
+
+    Call it once the batch size is final (after a trial's hyperparameters are applied).
+    Does nothing without ``--max_train_documents``.
+    """
+    if args.max_train_documents is None:
+        return
+    batch_size = effective_batch_size(args)
+    args.max_steps = math.ceil(args.max_train_documents / batch_size)
+    logger.info(
+        f"Training on {args.max_train_documents:_} documents: {args.max_steps:_} steps of {batch_size} documents"
+    )
+
+
 def check_trial_arguments(args: ScriptArguments) -> None:
     """Check that a hyperparameter-search trial is set up to be scored fairly and cheaply.
 
@@ -673,6 +815,16 @@ def main() -> None:
         f"Process rank: {args.local_rank}, device: {args.device}, n_gpu: {args.n_gpu}, "
         + f"distributed training: {bool(args.local_rank != -1)}, bf16: {args.bf16}, fp16: {args.fp16}"
     )
+    dataset_path = Path(args.dataset_path)
+    raw_datasets = datasets.load_from_disk(str(dataset_path))  # memory-mapped Arrow files
+    label_info = json.loads((dataset_path / "labels.json").read_text(encoding="utf-8"))
+    label_names: list[str] = label_info["label_names"]
+    logger.info(f"{len(label_names)} {label_info['label_type']} labels: {label_names}")
+    if args.template is None:
+        # Resolved before the trial record, so trials and the model config store the actual template.
+        args.template = default_template(raw_datasets)
+        logger.info(f"No --template given; using {args.template!r} for this dataset")
+
     trial_record: dict[str, Any] | None = None
     if args.hp_search_space is not None:
         check_trial_arguments(args)
@@ -686,9 +838,23 @@ def main() -> None:
                     f"{trial_dir} holds a completed trial with other parameters {previous['params']}; the search "
                     "space or seed changed, so use a new output directory"
                 )
+            if (previous.get("template"), previous.get("decode_url")) != (args.template, args.decode_url):
+                raise ValueError(
+                    f"{trial_dir} holds a completed trial with input template {previous.get('template')!r} "
+                    f"(decode_url={previous.get('decode_url')}); use a new output directory for another input"
+                )
             logger.info(f"Trial {args.hp_trial} is already complete in {trial_dir}; nothing to do")
             return
+        if (args.max_steps > 0 or args.max_train_documents is not None) and "num_train_epochs" in params:
+            raise ValueError(
+                "--max_steps or --max_train_documents overrides the searched num_train_epochs; use a search space "
+                "without num_train_epochs (e.g. configs/roihu/classifier/hp_space_budget.yaml)"
+            )
+        if args.max_train_documents is not None and "max_steps" in params:
+            raise ValueError("--max_train_documents sets max_steps; don't search max_steps as well")
         hp_search.apply_trial_params(args, params)
+        # After the trial's batch size is set: the step count depends on it.
+        apply_document_budget(args)
         args.output_dir = str(trial_dir)
         trial_record = {
             "trial": args.hp_trial,
@@ -698,14 +864,22 @@ def main() -> None:
             "search_seed": args.hp_search_seed,
             "dataset_path": args.dataset_path,
             "model_name": args.model_name,
+            "template": args.template,
+            "decode_url": args.decode_url,
             "max_train_samples": args.max_train_samples,
             "max_eval_samples": args.max_eval_samples,
+            "max_train_documents": args.max_train_documents,
+            # -1 means the length is set by num_train_epochs.
+            "max_steps": args.max_steps,
+            "effective_batch_size": effective_batch_size(args),
             "metric": args.metric_for_best_model,
             "greater_is_better": args.greater_is_better,
         }
         if args.process_index == 0:
             hp_search.write_trial(trial_dir, trial_record)
         logger.info(f"Hyperparameter trial {args.hp_trial}: {params}")
+    else:
+        apply_document_budget(args)
 
     logger.info(f"Training/evaluation parameters {args}")
     # Detecting last checkpoint.
@@ -718,12 +892,6 @@ def main() -> None:
                 f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
                 "the `--output_dir` to train from scratch."
             )
-
-    dataset_path = Path(args.dataset_path)
-    raw_datasets = datasets.load_from_disk(str(dataset_path))  # memory-mapped Arrow files
-    label_info = json.loads((dataset_path / "labels.json").read_text(encoding="utf-8"))
-    label_names: list[str] = label_info["label_names"]
-    logger.info(f"{len(label_names)} {label_info['label_type']} labels: {label_names}")
 
     # Set seed before initializing model.
     set_seed(args.seed)
@@ -751,6 +919,12 @@ def main() -> None:
     for split in splits.values():
         if split not in raw_datasets:
             raise KeyError(f"{dataset_path} has no split {split!r}; it has {list(raw_datasets)}")
+    if splits:
+        example = raw_datasets[next(iter(splits.values()))][0]
+        logger.info(
+            f"Input template {args.template!r} (decode_url={args.decode_url}); first document as model input:\n"
+            f"{render_input(example, args.template, args.decode_url)[:500]}"
+        )
     limits = {"train": args.max_train_samples, "validation": args.max_eval_samples, "test": None}
     tokenized = {
         name: tokenize_split(subsample(raw_datasets[split], limits[name], args.seed, split), tokenizer, args, split)
@@ -783,6 +957,9 @@ def main() -> None:
         logger.info(f"Classifier pooling: {config.classifier_pooling}")
     if getattr(config, "pad_token_id", None) is None:
         config.pad_token_id = tokenizer.pad_token_id
+    # Saved in config.json with the model: inference must build the input the same way.
+    config.input_template = args.template
+    config.decode_url = args.decode_url
 
     attn_implementation = resolve_attn_implementation(args.attn_implementation)
     logger.info(f"Attention implementation: {attn_implementation}")
@@ -861,12 +1038,16 @@ def main() -> None:
                 best_epoch=best.get("epoch"),
                 best_step=best.get("step"),
                 train_documents=len(tokenized["train"]),
+                train_steps=trainer.state.global_step,
                 train_runtime=metrics.get("train_runtime"),
                 evaluations=evaluations,
             )
             if trainer.is_world_process_zero():
                 hp_search.write_trial(Path(args.output_dir), trial_record)
-            logger.info(f"Trial {args.hp_trial}: best {key} = {best[key]:.5f} at epoch {best.get('epoch')}")
+            logger.info(
+                f"Trial {args.hp_trial}: best {key} = {best[key]:.5f} at step {best.get('step')} "
+                f"(epoch {best.get('epoch')})"
+            )
 
     # Evaluation
     if args.do_eval:
