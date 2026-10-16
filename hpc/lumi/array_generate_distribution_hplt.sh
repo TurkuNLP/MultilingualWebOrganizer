@@ -10,19 +10,20 @@
 #SBATCH --gpus-per-node=2
 #SBATCH -o ../../logs/%x_%A_%a.out
 #SBATCH -e ../../logs/%x_%A_%a.err
-#SBATCH --array=0-71%36
+#SBATCH --array=0-75%36
 
-# Label the HPLT samples of data/hplt_noisy_sample (made by sample_hplt_by_quality.sh)
+# Label the HPLT samples of data/hplt_<data_quality>_sample (made by sample_hplt_by_quality.sh;
+# set data_quality below to clean, noisy or poor)
 # with topic and format label distributions from Qwen/Qwen3.8-27B.
 # How to run on LUMI (submit from this directory so relative log paths resolve):
 #   cd /scratch/project_462001516/users/tarkkaot/MultilingualWebOrganizer/hpc/lumi
 #   sbatch array_generate_distribution_hplt.sh [max_documents]
 #
-# This array has 72 tasks, one for each of 36 languages and 2 label types, each on 2 GPUs:
-#   tasks 0-35:  topic  (language N of the list below is task N)
-#   tasks 36-71: format (language N of the list below is task 36 + N)
+# This array has 76 tasks, one for each of 38 languages and 2 label types, each on 2 GPUs:
+#   tasks 0-37:  topic  (language N of the list below is task N)
+#   tasks 38-75: format (language N of the list below is task 38 + N)
 # Run a subset with --array, e.g. English and Finnish, both label types:
-#   sbatch --array=5,7,41,43 array_generate_distribution_hplt.sh
+#   sbatch --array=5,7,43,45 array_generate_distribution_hplt.sh
 # If you change the number of languages, also change the --array argument (2 * num_languages).
 #
 # max_documents defaults to the config value (run.max_documents in generate_hplt.yaml).
@@ -35,7 +36,7 @@
 #
 # Prompts use --prompt-order rotated so vLLM can reuse the shared prompt prefix.
 #
-# Output: results/distribution/Qwen3.8-27B-hplt-annotations/{topic,format}/<language>.jsonl
+# Output: results/distribution/Qwen3.8-27B-hplt-annotations/<data_quality>/{topic,format}/<language>.jsonl
 
 set -euo pipefail
 
@@ -69,7 +70,7 @@ languages=(
     bulgarian czech danish german greek english estonian finnish french irish
     croatian hungarian italian latvian lithuanian maltese dutch polish portuguese romanian
     slovak slovene spanish swedish catalan basque galician bosnian georgian macedonian
-    albanian serbian turkish ukrainian icelandic norwegian
+    albanian serbian turkish ukrainian icelandic norwegian_bokmål latgalian norwegian_nynorsk
 )
 
 language_index=$SLURM_ARRAY_TASK_ID
@@ -113,7 +114,7 @@ srun singularity run -B /scratch/project_462001516 "$SIF" python "$python_script
     --model-name "$model" \
     --tensor-parallel-size "$tensor_parallel_size" \
     --input-jsonl "$input_jsonl" \
-    --language "$language" \
+    --language "${language//_/ }" \
     --label-type "$label_type" \
     --labels "$base_dir/scripts/data_processing/${label_type}s.yaml" \
     --examples "$base_dir/scripts/data_processing/${label_type}_examples.yaml" \
