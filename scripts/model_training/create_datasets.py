@@ -225,8 +225,12 @@ def generate_rows(
                 doc_id, text = record.get("id"), record.get("text")
                 if not isinstance(doc_id, str) or not doc_id:
                     raise ValueError(f"{where}: record without a document ID")
-                if not isinstance(text, str) or not text.strip():
-                    raise ValueError(f"{where}: record {doc_id!r} has no text")
+                if not isinstance(text, str):
+                    raise ValueError(f"{where}: record {doc_id!r} has no text field")
+                if not text.strip():
+                    # Pages without content are labelled (usually Bad example) and kept.
+                    LOGGER.warning("%s: document %r has %s; keeping it", where, doc_id,
+                                   "empty text" if not text else "only whitespace as text")
                 if (language, doc_id) in seen:
                     raise ValueError(f"{where}: duplicate document {doc_id!r} for language {language!r}")
                 seen.add((language, doc_id))

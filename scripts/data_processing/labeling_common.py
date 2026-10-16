@@ -56,12 +56,17 @@ def normalize_label_type(label_type: str) -> str:
 
 
 class InputDocument(BaseModel):
-    """One input JSONL record."""
+    """One input JSONL record.
+
+    The text may be empty: web crawls contain a few pages without content, and such a
+    page is labelled like any other (the model can choose ``Bad example``) rather than
+    stopping the run. The streaming functions log a warning for each one.
+    """
 
     model_config = ConfigDict(extra="allow", strict=True)
 
     doc_id: str = Field(min_length=1)
-    text: str = Field(min_length=1)
+    text: str
 
     @model_validator(mode="before")
     @classmethod
@@ -273,6 +278,17 @@ def prompt_order_for_document(
     raise ValueError(f"prompt order must be one of {PROMPT_ORDER_MODES}; got {mode!r}")
 
 
+def _warn_if_no_text(document: InputDocument, location: str) -> None:
+    """Log a warning for a document whose text is empty or only whitespace."""
+    if not document.text.strip():
+        LOGGER.warning(
+            "%s: document %r has %s; labelling it anyway",
+            location,
+            document.doc_id,
+            "empty text" if not document.text else "only whitespace as text",
+        )
+
+
 def stream_jsonl(path: Path) -> Iterator[tuple[int, InputDocument]]:
     """Yield validated documents without loading the input file into memory."""
     if not path.is_file():
@@ -286,7 +302,7 @@ def stream_jsonl(path: Path) -> Iterator[tuple[int, InputDocument]]:
                 raw = json.loads(line)
                 if not isinstance(raw, dict):
                     raise TypeError("record must be a JSON object")
-                yield line_number, InputDocument.model_validate(raw)
+                document = InputDocument.model_validate(raw)
             except (
                 json.JSONDecodeError,
                 TypeError,
@@ -296,6 +312,8 @@ def stream_jsonl(path: Path) -> Iterator[tuple[int, InputDocument]]:
                 raise ValueError(
                     f"Invalid input record in {path}:{line_number}: {exc}"
                 ) from exc
+            _warn_if_no_text(document, f"{path}:{line_number}")
+            yield line_number, document
 
 
 def stream_huggingface_dataset(
@@ -325,12 +343,14 @@ def stream_huggingface_dataset(
                 "record must be a mapping"
             )
         try:
-            yield row_number, InputDocument.model_validate(row)
+            document = InputDocument.model_validate(row)
         except ValidationError as exc:
             raise ValueError(
                 f"Invalid HuggingFace dataset record at streamed row "
                 f"{row_number}: {exc}"
             ) from exc
+        _warn_if_no_text(document, f"{dataset_name} row {row_number}")
+        yield row_number, document
 
 
 class SavedRecordBase(BaseModel):
