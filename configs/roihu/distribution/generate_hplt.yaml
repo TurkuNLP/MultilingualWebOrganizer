@@ -1,0 +1,23 @@
+# configs/roihu/distribution/generate_hplt.yaml
+# generate_base.yaml for the HPLT samples: no input dataset, because the launch
+# script (hpc/roihu/array_generate_distribution_hplt.sh) passes a JSONL file per
+# language, and a config dataset cannot be combined with --input-jsonl.
+paths:
+  base_dir: /scratch/project_2020507/users/tarkkaot/MultilingualWebOrganizer
+
+model:
+  name: Qwen/Qwen3.8-27B
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.9
+  dtype: auto
+  max_model_len: 32768
+  seed: 0
+  thinking_mode: disabled
+
+run:
+  batch_size: 512
+  max_document_tokens: 8192
+  max_documents: 100000
+  # Exit with a traceback if no batch completes for this long (0 disables); resubmit to resume.
+  stall_timeout_minutes: 20
+  log_level: INFO

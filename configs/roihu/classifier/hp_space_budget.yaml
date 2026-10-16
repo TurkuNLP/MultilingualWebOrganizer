@@ -1,0 +1,31 @@
+# configs/roihu/classifier/hp_space_budget.yaml
+# Search space for trials with a fixed document budget: hpc/roihu/hp_search_classifier.sh
+# with TRAIN_DOCUMENTS=<n> uses this file by default. Every trial trains on the same
+# number of documents (finetune.py --max_train_documents); its optimizer steps are that
+# number divided by its batch size. So batch size can be searched without the larger
+# batches simply training longer, which is why this space has no num_train_epochs
+# (the budget replaces it).
+#
+# Changing this file changes what every trial index means: start a new search
+# (new search name) after editing it. Completed trials refuse to be overwritten
+# with different parameters.
+
+parameters:
+  # mmBERT fine-tuning typically works at 1e-5 to 1e-4; log scale spreads trials evenly.
+  # Larger batches usually want larger learning rates; random search samples the two
+  # independently, so read the results per batch size.
+  learning_rate: {distribution: log_uniform, low: 1.0e-5, high: 1.5e-4}
+  # Effective batch size 16, 32, 64, or 128 at --per_device_train_batch_size 8. 128 is
+  # included because 64, the largest in hp_space.yaml, won the epoch-based searches.
+  gradient_accumulation_steps: {distribution: choice, values: [2, 4, 8, 16]}
+  weight_decay: {distribution: uniform, low: 0.0, high: 0.1}
+  # A float below 1 is a fraction of the total training steps.
+  warmup_steps: {distribution: uniform, low: 0.0, high: 0.15}
+  classifier_pooling: {distribution: choice, values: [cls, mean]}
+  # label_temperature is not searched (it stays at finetune.py's default 1.0). In the
+  # epoch-based searches search-{topic,format}-20k (2026-10-14), every trial at
+  # temperature 3.0 ended near 0.28 bits JS divergence whatever its other settings,
+  # because the objective compares with the untempered LLM distributions; top-1
+  # accuracy was no worse. Searching it spent most trials on settings the objective
+  # rejects by construction. Add it back only with an accuracy objective, e.g.
+  #   label_temperature: {distribution: choice, values: [1.0, 1.5, 2.0, 3.0]}
