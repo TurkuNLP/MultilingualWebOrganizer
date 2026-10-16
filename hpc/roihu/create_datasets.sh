@@ -12,11 +12,16 @@
 # Build train/validation/test datasets of soft labels from a label distribution run.
 # Usage (submit from this directory so relative log paths resolve):
 #   sbatch create_datasets.sh <annotation_run> <topic|format> <dataset_name> [extra create_datasets.py args]
-# e.g. sbatch create_datasets.sh Qwen3.8-27B-annotations topic dataset1
+# e.g. sbatch create_datasets.sh Qwen3.8-27B-hplt-annotations topic hplt-v1
+#      sbatch create_datasets.sh Qwen3.8-27B-hplt-annotations format hplt-v1
+#      sbatch create_datasets.sh Qwen3.8-27B-hplt-annotations topic hplt-v1-nourl --no_url
 #
 # Reads results/distribution/<annotation_run>/<label type>/*.jsonl (one file per
-# language) and writes results/datasets/<label type>/<dataset_name>. Splits are by
-# document ID, so all translations of a document land in the same split.
+# language) and writes results/datasets/<label type>/<dataset_name> with the columns
+# id, language, url, text and labels. Splits are by a seeded hash of the document ID
+# (80/10/10 by default), so translations of a document in the parallel data land in
+# the same split. Every record needs a url field (null if it has no URL), unless
+# --no_url leaves the URL out; finetune.py then trains on the text alone.
 # The job needs no GPU, but the python-vllm module only runs on the (ARM) GPU nodes.
 
 set -euo pipefail

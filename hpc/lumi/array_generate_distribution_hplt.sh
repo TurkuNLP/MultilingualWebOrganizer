@@ -29,6 +29,8 @@
 # The samples are in shuffled order, so a smaller number labels a mixed subset of each.
 # A task that runs out of time can be submitted again; it resumes from the results it
 # has already written.
+# A task that makes no progress for 20 minutes (run.stall_timeout_minutes) exits with
+# code 1 and a traceback in its .err log showing where it hung; resubmit it to resume.
 # A task whose language has no sample file stops with an error.
 #
 # Prompts use --prompt-order rotated so vLLM can reuse the shared prompt prefix.
