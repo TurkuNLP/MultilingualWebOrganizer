@@ -2,7 +2,7 @@
 #SBATCH --job-name=distribution_hplt
 #SBATCH --account=project_462001516
 #SBATCH --partition=small-g
-#SBATCH --time=40:00:00
+#SBATCH --time=08:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=14 # 7 per GPU
@@ -82,10 +82,11 @@ if (( language_index >= ${#languages[@]} )); then
     exit 1
 fi
 
+data_quality=poor # clean, noisy or poor
 language=${languages[$language_index]}
-input_jsonl="$base_dir/data/hplt_noisy_sample/${language}.jsonl"
+input_jsonl="$base_dir/data/hplt_${data_quality}_sample/${language}.jsonl"
 # ${model##*/} drops the organization prefix, e.g. Qwen3.8-27B.
-output="$base_dir/results/distribution/${model##*/}-hplt-annotations/${label_type}/${language}.jsonl"
+output="$base_dir/results/distribution/${model##*/}-hplt-annotations/${data_quality}/${label_type}/${language}.jsonl"
 
 # Use every allocated GPU for tensor parallelism, so the two cannot disagree.
 tensor_parallel_size="${SLURM_GPUS_ON_NODE:?no GPU count from SLURM; request GPUs with --gpus-per-node=N}"

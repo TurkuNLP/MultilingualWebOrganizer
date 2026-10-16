@@ -34,9 +34,11 @@ module load Local-LAIF lumi-aif-singularity-bindings
 base_dir="/scratch/project_462001516/users/tarkkaot/MultilingualWebOrganizer"
 python_script="$base_dir/scripts/data_processing/sample_hplt_by_quality.py"
 SIF="$base_dir/environments/lumi/vllm.sif"
-input_dir="/appl/local/openeurollm/training/catalogue/hplt/4.0/noisy"
+
+data_quality=clean # clean, noisy or poor
+input_dir="/appl/local/openeurollm/training/catalogue/hplt/4.0/${data_quality}"
 languages_file="$base_dir/data/oellm_languages.txt"
-output_dir="$base_dir/data/hplt_noisy_sample"
+output_dir="$base_dir/data/hplt_${data_quality}_sample"
 echo "Input:     $input_dir"
 echo "Languages: $languages_file"
 echo "Output:    $output_dir"
