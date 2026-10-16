@@ -121,6 +121,9 @@ LOGGER = logging.getLogger(__name__)
 
 # The answer letter must be the first generated token, so thinking stays off.
 THINKING_MODES = ("disabled",)
+# Minutes without a completed batch before the stall watchdog ends a run. Batches of
+# 512 documents normally take 3-6 minutes on one GH200.
+DEFAULT_STALL_TIMEOUT_MINUTES = 20.0
 
 
 class LogprobOutputError(RuntimeError):
@@ -342,6 +345,7 @@ class LogprobModelClient:
         max_documents: int | None = None,
         language: str = "English",
         label_type: str = "topic",
+        stall_timeout_seconds: float | None = None,
     ) -> int:
         """Process validated documents, save results, and resume safely."""
         stable_ids = [label.id for label in labels]
@@ -381,6 +385,7 @@ class LogprobModelClient:
             ),
             batch_size=batch_size,
             max_documents=max_documents,
+            stall_timeout_seconds=stall_timeout_seconds,
         )
 
     def run_jsonl(
@@ -397,6 +402,7 @@ class LogprobModelClient:
         max_documents: int | None = None,
         language: str = "English",
         label_type: str = "topic",
+        stall_timeout_seconds: float | None = None,
     ) -> int:
         """Stream a local JSONL file, score it, save results, and resume."""
         if input_path.resolve() == output_path.resolve():
@@ -413,6 +419,7 @@ class LogprobModelClient:
             max_documents=max_documents,
             language=language,
             label_type=label_type,
+            stall_timeout_seconds=stall_timeout_seconds,
         )
 
     def run_dataset(
@@ -431,6 +438,7 @@ class LogprobModelClient:
         max_documents: int | None = None,
         language: str = "English",
         label_type: str = "topic",
+        stall_timeout_seconds: float | None = None,
     ) -> int:
         """Stream a HuggingFace dataset, score it, save results, and resume."""
         if not dataset_name.strip():
@@ -453,6 +461,7 @@ class LogprobModelClient:
             max_documents=max_documents,
             language=language,
             label_type=label_type,
+            stall_timeout_seconds=stall_timeout_seconds,
         )
 
     def _process_batch(
@@ -649,6 +658,8 @@ class LogprobModelClient:
         return SavedDistributionRecord(
             id=doc_id,
             text=document.text,
+            # The same value the prompt used, from the same helper.
+            url=document_url(document),
             label=top_label,
             label_prob=label_probs[top_label],
             label_probs=label_probs,
@@ -689,6 +700,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "prefix. Default: random."
         ),
     )
+    parser.add_argument(
+        "--stall-timeout-minutes",
+        type=float,
+        help=(
+            "Exit with a traceback if no batch completes for this many minutes, so "
+            "a hung job frees its GPUs; resubmit to resume. 0 disables it. "
+            f"Default: {DEFAULT_STALL_TIMEOUT_MINUTES:g}."
+        ),
+    )
     return parser
 
 
@@ -700,10 +720,14 @@ def _merge_cli_and_config(
         parser,
         argv,
         thinking_modes=THINKING_MODES,
-        extra_defaults={"prompt_order": "random"},
+        extra_defaults={
+            "prompt_order": "random",
+            "stall_timeout_minutes": DEFAULT_STALL_TIMEOUT_MINUTES,
+        },
         extra_run_keys={
             "max_document_chars": "max_document_chars",
             "prompt_order": "prompt_order",
+            "stall_timeout_minutes": "stall_timeout_minutes",
         },
         unsupported_run_keys={
             "max_tokens": (
@@ -714,6 +738,8 @@ def _merge_cli_and_config(
     )
     if args.max_document_chars is not None and args.max_document_chars < 1:
         parser.error("--max-document-chars must be >= 1")
+    if args.stall_timeout_minutes < 0:
+        parser.error("--stall-timeout-minutes must be >= 0 (0 disables the watchdog)")
     # Config values bypass argparse choices, so check prompt_order explicitly.
     if args.prompt_order not in PROMPT_ORDER_MODES:
         parser.error(f"prompt_order must be one of {list(PROMPT_ORDER_MODES)}")
@@ -772,6 +798,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "max_documents": args.max_documents,
         "language": args.language,
         "label_type": args.label_type,
+        "stall_timeout_seconds": (
+            args.stall_timeout_minutes * 60 if args.stall_timeout_minutes > 0 else None
+        ),
     }
     if args.input_jsonl is not None:
         client.run_jsonl(input_path=args.input_jsonl, **common_kwargs)
