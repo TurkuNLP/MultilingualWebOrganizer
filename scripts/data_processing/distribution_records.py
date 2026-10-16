@@ -44,6 +44,8 @@ class SavedDistributionRecord(SavedRecordBase):
     Attributes:
         id: Document ID.
         text: Original, untruncated document text.
+        url: URL of the page as shown to the model in the prompt, or ``None``
+            if the document has no URL (then the prompt has none either).
         label: Short name of the most probable label.
         label_prob: Probability of ``label``.
         label_probs: Probability per label short name, in label-file order.
@@ -60,6 +62,7 @@ class SavedDistributionRecord(SavedRecordBase):
     """
 
     text: str = ""
+    url: str | None = Field(default=None, min_length=1)
     label: str = Field(min_length=1)
     label_prob: float
     label_probs: dict[str, float] = Field(min_length=1)

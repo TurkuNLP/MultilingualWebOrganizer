@@ -124,6 +124,8 @@ class SavedApiLabelRecord(SavedRecordBase):
     Attributes:
         id: Document ID.
         text: Original, untruncated document text.
+        url: URL of the page as shown to the model in the prompt, or ``None``
+            if the document has no URL (then the prompt has none either).
         label: Short name of the chosen label.
         answer_letter: Letter the model answered with.
         explanation: Text the model wrote after the letter.
@@ -141,6 +143,7 @@ class SavedApiLabelRecord(SavedRecordBase):
     """
 
     text: str = ""
+    url: str | None = Field(default=None, min_length=1)
     label: str = Field(min_length=1)
     answer_letter: str = Field(min_length=1, max_length=1)
     explanation: str = ""
@@ -447,6 +450,8 @@ def process_batch(
         record = SavedApiLabelRecord(
             id=document.doc_id,
             text=document.text,
+            # The same value the prompt used, from the same helper.
+            url=document_url(document),
             label=stable_to_short[resources.answer_to_stable[letter]],
             answer_letter=letter,
             explanation=explanation,

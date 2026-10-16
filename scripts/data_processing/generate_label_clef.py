@@ -126,6 +126,9 @@ DEFAULT_MAX_MODEL_LEN = 16384
 DEFAULT_MAX_BATCH_TOKENS = 32768
 # Documents read, scored, and saved together; forward passes are smaller (see above).
 DEFAULT_BATCH_SIZE = 256
+# Minutes without a completed batch before the stall watchdog ends a run. Batches of
+# 512 documents normally take 3-6 minutes on one GH200.
+DEFAULT_STALL_TIMEOUT_MINUTES = 20.0
 
 
 def render_state(text: str, url: str | None) -> str:
@@ -261,6 +264,8 @@ def build_distribution_record(
     return SavedDistributionRecord(
         id=document.doc_id,
         text=document.text,
+        # The same value the state used (render_state), from the same helper.
+        url=document_url(document),
         label=top_label,
         label_prob=label_probs[top_label],
         label_probs=label_probs,
@@ -404,6 +409,7 @@ class ClefModelClient:
         max_documents: int | None = None,
         language: str = "English",
         label_type: str = "topic",
+        stall_timeout_seconds: float | None = None,
     ) -> int:
         """Process validated documents, save results, and resume safely."""
         if not labels:
@@ -455,6 +461,7 @@ class ClefModelClient:
             ),
             batch_size=batch_size,
             max_documents=max_documents,
+            stall_timeout_seconds=stall_timeout_seconds,
         )
 
     @staticmethod
@@ -599,6 +606,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "--max-document-tokens. Unset by default."
         ),
     )
+    parser.add_argument(
+        "--stall-timeout-minutes",
+        type=float,
+        help=(
+            "Exit with a traceback if no batch completes for this many minutes, so "
+            "a hung job frees its GPUs; resubmit to resume. 0 disables it. "
+            f"Default: {DEFAULT_STALL_TIMEOUT_MINUTES:g}."
+        ),
+    )
     return parser
 
 
@@ -616,10 +632,12 @@ def _merge_cli_and_config(
             "batch_size": DEFAULT_BATCH_SIZE,
             "max_batch_tokens": DEFAULT_MAX_BATCH_TOKENS,
             "device": "cuda",
+            "stall_timeout_minutes": DEFAULT_STALL_TIMEOUT_MINUTES,
         },
         extra_run_keys={
             "max_document_chars": "max_document_chars",
             "max_batch_tokens": "max_batch_tokens",
+            "stall_timeout_minutes": "stall_timeout_minutes",
         },
         extra_model_keys={"revision": "model_revision", "device": "device"},
         unsupported_run_keys={
@@ -631,6 +649,8 @@ def _merge_cli_and_config(
         parser.error("--max-document-chars must be >= 1")
     if args.max_batch_tokens < 1:
         parser.error("--max-batch-tokens must be >= 1")
+    if args.stall_timeout_minutes < 0:
+        parser.error("--stall-timeout-minutes must be >= 0 (0 disables the watchdog)")
     # A local directory has no revision; a repository defaults to the reviewed commit.
     if args.model_revision is None and not Path(args.model_name).is_dir():
         args.model_revision = REVIEWED_REVISION
@@ -692,6 +712,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "max_documents": args.max_documents,
         "language": args.language,
         "label_type": args.label_type,
+        "stall_timeout_seconds": (
+            args.stall_timeout_minutes * 60 if args.stall_timeout_minutes > 0 else None
+        ),
     }
     if args.input_jsonl is not None:
         client.run_jsonl(input_path=args.input_jsonl, **common_kwargs)

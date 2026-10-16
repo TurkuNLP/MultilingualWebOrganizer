@@ -11,6 +11,7 @@ same way, which keeps their outputs comparable.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import hashlib
 import json
 import logging
@@ -429,6 +430,29 @@ class JsonlResultStore(Generic[R]):
             os.fsync(handle.fileno())
 
 
+def arm_stall_watchdog(timeout_seconds: float | None) -> None:
+    """Start, or restart, the countdown of the stall watchdog.
+
+    If the countdown runs out, ``faulthandler`` writes the traceback of every
+    thread to stderr (the SLURM ``.err`` log), headed ``Timeout (H:MM:SS)!``, and
+    exits the process with code 1. Its timer runs in a separate thread that doesn't
+    need the GIL, so it fires even while the main thread is blocked, e.g. waiting
+    for vLLM's engine process. Calling this again restarts the countdown.
+
+    Args:
+        timeout_seconds: Seconds without progress before exiting; ``None`` disables
+            the watchdog.
+    """
+    if timeout_seconds is None:
+        return
+    faulthandler.dump_traceback_later(timeout_seconds, exit=True)
+
+
+def disarm_stall_watchdog() -> None:
+    """Stop the stall watchdog's countdown, if one is running."""
+    faulthandler.cancel_dump_traceback_later()
+
+
 def process_documents_in_batches(
     *,
     documents: Iterable[tuple[int, InputDocument]],
@@ -436,6 +460,7 @@ def process_documents_in_batches(
     process_batch: Callable[[Sequence[tuple[int, InputDocument]]], int],
     batch_size: int,
     max_documents: int | None,
+    stall_timeout_seconds: float | None = None,
 ) -> int:
     """Stream documents in batches, skipping completed ones, and resume safely.
 
@@ -446,6 +471,12 @@ def process_documents_in_batches(
             the number of documents saved.
         batch_size: Maximum number of documents per batch.
         max_documents: Stop once the store holds this many results.
+        stall_timeout_seconds: If set, a watchdog ends the process when no batch
+            completes within this many seconds (see :func:`arm_stall_watchdog`).
+            A labelling job that hangs then fails within the limit, with a
+            traceback showing where it hung, instead of holding its GPUs until
+            the SLURM time limit. Results already saved are kept, so the job can
+            be resubmitted to resume.
 
     Returns:
         The number of newly processed documents.
@@ -457,75 +488,89 @@ def process_documents_in_batches(
         raise ValueError("batch_size must be >= 1")
     if max_documents is not None and max_documents < 1:
         raise ValueError("max_documents must be >= 1")
-    seen_input_ids: set[str] = set()
-    processed = 0
-    stopped_early = False
-
-    pending: list[tuple[int, InputDocument]] = []
-    document_iterator = iter(documents)
+    if stall_timeout_seconds is not None and stall_timeout_seconds <= 0:
+        raise ValueError("stall_timeout_seconds must be > 0")
+    if stall_timeout_seconds is not None:
+        LOGGER.info(
+            "Stall watchdog: the run exits with a traceback if no batch completes "
+            "within %g minutes",
+            stall_timeout_seconds / 60,
+        )
+    arm_stall_watchdog(stall_timeout_seconds)
     try:
-        for line_number, document in document_iterator:
-            if max_documents is not None and len(store.completed) >= max_documents:
-                LOGGER.info(
-                    "Reached max_documents=%d; stopping input processing",
-                    max_documents,
-                )
-                stopped_early = True
-                break
-            if document.doc_id in seen_input_ids:
-                raise ValueError(f"Duplicate doc_id {document.doc_id!r} in input")
-            seen_input_ids.add(document.doc_id)
-            if document.doc_id in store.completed:
-                continue
-            pending.append((line_number, document))
-            remaining = (
-                max_documents - len(store.completed)
-                if max_documents is not None
-                else batch_size
-            )
-            target_batch_size = min(batch_size, remaining)
-            if len(pending) < target_batch_size:
-                continue
+        seen_input_ids: set[str] = set()
+        processed = 0
+        stopped_early = False
 
+        pending: list[tuple[int, InputDocument]] = []
+        document_iterator = iter(documents)
+        try:
+            for line_number, document in document_iterator:
+                if max_documents is not None and len(store.completed) >= max_documents:
+                    LOGGER.info(
+                        "Reached max_documents=%d; stopping input processing",
+                        max_documents,
+                    )
+                    stopped_early = True
+                    break
+                if document.doc_id in seen_input_ids:
+                    raise ValueError(f"Duplicate doc_id {document.doc_id!r} in input")
+                seen_input_ids.add(document.doc_id)
+                if document.doc_id in store.completed:
+                    continue
+                pending.append((line_number, document))
+                remaining = (
+                    max_documents - len(store.completed)
+                    if max_documents is not None
+                    else batch_size
+                )
+                target_batch_size = min(batch_size, remaining)
+                if len(pending) < target_batch_size:
+                    continue
+
+                batch_processed = process_batch(pending)
+                arm_stall_watchdog(stall_timeout_seconds)
+                processed += batch_processed
+                LOGGER.info(
+                    "Processed %d documents in batch; total documents processed: %d",
+                    batch_processed,
+                    len(store.completed),
+                )
+                pending = []
+                if max_documents is not None and len(store.completed) >= max_documents:
+                    LOGGER.info(
+                        "Reached max_documents=%d; stopping input processing",
+                        max_documents,
+                    )
+                    stopped_early = True
+                    break
+        finally:
+            close = getattr(document_iterator, "close", None)
+            if close is not None:
+                close()
+
+        if pending and (max_documents is None or len(store.completed) < max_documents):
             batch_processed = process_batch(pending)
+            arm_stall_watchdog(stall_timeout_seconds)
             processed += batch_processed
             LOGGER.info(
                 "Processed %d documents in batch; total documents processed: %d",
                 batch_processed,
                 len(store.completed),
             )
-            pending = []
-            if max_documents is not None and len(store.completed) >= max_documents:
-                LOGGER.info(
-                    "Reached max_documents=%d; stopping input processing",
-                    max_documents,
-                )
-                stopped_early = True
-                break
-    finally:
-        close = getattr(document_iterator, "close", None)
-        if close is not None:
-            close()
-
-    if pending and (max_documents is None or len(store.completed) < max_documents):
-        batch_processed = process_batch(pending)
-        processed += batch_processed
+        unknown_completed = store.completed - seen_input_ids
+        if unknown_completed and not stopped_early:
+            raise ValueError(
+                "Output contains doc_ids missing from input: "
+                f"{sorted(unknown_completed)[:5]!r}"
+            )
         LOGGER.info(
-            "Processed %d documents in batch; total documents processed: %d",
-            batch_processed,
+            "Completed %d new documents; output contains %d results",
+            processed,
             len(store.completed),
         )
-    unknown_completed = store.completed - seen_input_ids
-    if unknown_completed and not stopped_early:
-        raise ValueError(
-            "Output contains doc_ids missing from input: "
-            f"{sorted(unknown_completed)[:5]!r}"
-        )
-    LOGGER.info(
-        "Completed %d new documents; output contains %d results",
-        processed,
-        len(store.completed),
-    )
+    finally:
+        disarm_stall_watchdog()
     return processed
 
 
