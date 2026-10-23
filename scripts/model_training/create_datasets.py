@@ -24,6 +24,15 @@ the assignment doesn't depend on file order or on which files are included. For 
 data such as the HPLT samples, whose documents differ between languages, the hash is
 simply a reproducible random split of each language.
 
+The hash gives each split its requested share only on average, so a small language can
+end up with noticeably more or fewer validation or test documents than its share.
+``--stratify_by_language`` instead splits every language in exactly the requested
+ratios (rounded): within each language, the documents are ordered by the same seeded
+hash and cut at the requested counts. It reads the input once more to count the
+documents. A document ID present in several languages must still land in the same split
+in all of them; if the cuts would separate translations, the script stops (parallel data
+with the same documents in every language is split identically either way).
+
 Rows are stored in input order: one block per language (files in name order), each in
 file order. Training doesn't depend on that order: ``finetune.py``'s length-grouped
 sampler draws a new random permutation of the whole training split every epoch, and
@@ -127,19 +136,100 @@ def language_of(path: Path) -> str:
     return path.stem.split("-", 1)[0]
 
 
+def hash_position(doc_id: str, seed: int) -> float:
+    """Map a document ID to a reproducible pseudo-random number in [0, 1)."""
+    digest = hashlib.sha256(f"{seed}:{doc_id}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") / 2**64
+
+
+def split_at(position: float, cuts: tuple[float, float]) -> str:
+    """Return the split of a hash position: ``train`` below ``cuts[0]``, ``validation`` below ``cuts[1]``."""
+    if position < cuts[0]:
+        return "train"
+    if position < cuts[1]:
+        return "validation"
+    return "test"
+
+
 def split_of(doc_id: str, seed: int, train_ratio: float, val_ratio: float) -> str:
     """Assign a document ID to a split with a seeded hash.
 
     The hash maps the ID to a number in [0, 1); the split ratios cut that interval, so
     the realized split sizes are close to, but not exactly, the requested ratios.
     """
-    digest = hashlib.sha256(f"{seed}:{doc_id}".encode("utf-8")).digest()
-    position = int.from_bytes(digest[:8], "big") / 2**64
-    if position < train_ratio:
-        return "train"
-    if position < train_ratio + val_ratio:
-        return "validation"
-    return "test"
+    return split_at(hash_position(doc_id, seed), (train_ratio, train_ratio + val_ratio))
+
+
+def read_document_id(line: str, where: str) -> str:
+    """Return the document ID of a result line, parsing it only if the ID is not its first field.
+
+    Raises:
+        ValueError: If the line has no document ID.
+    """
+    for prefix in ('{"id":"', '{"id": "'):
+        if line.startswith(prefix):
+            end = line.find('"', len(prefix))
+            value = line[len(prefix):end]
+            if end > len(prefix) and "\\" not in value:
+                return value
+    doc_id = json.loads(line).get("id")
+    if not isinstance(doc_id, str) or not doc_id:
+        raise ValueError(f"{where}: record without a document ID")
+    return doc_id
+
+
+def stratified_cuts(
+    files: Sequence[Path], seed: int, train_ratio: float, val_ratio: float
+) -> dict[str, tuple[float, float]]:
+    """Return, per language, the hash positions that split it in exactly the requested ratios.
+
+    Within a language, the documents are ordered by their hash position; the first
+    ``round(train_ratio * n)`` go to ``train`` and the documents up to
+    ``round((train_ratio + val_ratio) * n)`` to ``validation``, the rest to ``test``.
+
+    Raises:
+        ValueError: If a document ID present in several languages would land in
+            different splits in them.
+    """
+    positions: dict[str, list[float]] = defaultdict(list)
+    first_language: dict[str, str] = {}
+    shared: dict[str, set[str]] = defaultdict(set)
+    for path in files:
+        language = language_of(path)
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    raise ValueError(f"{path}:{line_number}: empty line")
+                doc_id = read_document_id(line, f"{path}:{line_number}")
+                positions[language].append(hash_position(doc_id, seed))
+                other = first_language.setdefault(doc_id, language)
+                if other != language:
+                    shared[doc_id].update((other, language))
+
+    cuts: dict[str, tuple[float, float]] = {}
+    for language, values in positions.items():
+        values.sort()
+        n = len(values)
+        n_train = round(train_ratio * n)
+        n_train_val = max(n_train, round((train_ratio + val_ratio) * n))
+        # The cut is the first position outside the split; 1.0 is above every position.
+        cuts[language] = (
+            values[n_train] if n_train < n else 1.0,
+            values[n_train_val] if n_train_val < n else 1.0,
+        )
+        LOGGER.info("%s: %d documents, stratified into %d / %d / %d", language, n, n_train,
+                    n_train_val - n_train, n - n_train_val)
+
+    conflicts = [
+        doc_id for doc_id, languages in shared.items()
+        if len({split_at(hash_position(doc_id, seed), cuts[language]) for language in languages}) > 1
+    ]
+    if conflicts:
+        raise ValueError(
+            f"--stratify_by_language would put {len(conflicts)} document(s) in different splits in different "
+            f"languages, e.g. {conflicts[0]!r}; leave it out to keep translations in the same split"
+        )
+    return cuts
 
 
 def label_vector(record: dict[str, Any], label_names: Sequence[str], where: str) -> list[float]:
@@ -198,6 +288,7 @@ def generate_rows(
     train_ratio: float,
     val_ratio: float,
     include_url: bool,
+    language_cuts: dict[str, tuple[float, float]] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Stream validated rows, each tagged with its split, from the input files.
 
@@ -208,6 +299,8 @@ def generate_rows(
         train_ratio: Share of document IDs assigned to ``train``.
         val_ratio: Share of document IDs assigned to ``validation``.
         include_url: Add a ``url`` column (and require a ``url`` field in every record).
+        language_cuts: Per-language split cuts from ``stratified_cuts``, which replace
+            the ratios; None to split every language by the ratios.
 
     Raises:
         ValueError: If a record is malformed or a document ID repeats within a language.
@@ -241,7 +334,11 @@ def generate_rows(
                     **row,
                     "text": text,
                     "labels": label_vector(record, label_names, where),
-                    "split": split_of(doc_id, seed, train_ratio, val_ratio),
+                    "split": split_at(
+                        hash_position(doc_id, seed),
+                        language_cuts[language] if language_cuts is not None
+                        else (train_ratio, train_ratio + val_ratio),
+                    ),
                 }
 
 
@@ -369,6 +466,19 @@ def make_readme(
     ) + f" | {share(soft_train.sum(), totals['train'])} |"
 
     input_list = "\n".join(f"- {file}" for file in files)
+    if args.stratify_by_language:
+        split_text = (
+            f"Stratified by language (`--stratify_by_language`): within each language, the documents\n"
+            f"are ordered by a seeded hash of their ID (seed {args.seed}) and cut at the requested\n"
+            "ratios, so every language is split in exactly those shares (rounded). Documents present\n"
+            "in several languages are in the same split in all of them."
+        )
+    else:
+        split_text = (
+            f"Document IDs are assigned to splits by a seeded hash (seed {args.seed}), so all language\n"
+            "versions of a document are in the same split. The realized shares are close to, but\n"
+            "not exactly, the requested ratios."
+        )
     if missing_urls is None:
         url_text = (
             "The dataset was made with `--no_url`: it has no `url` column, and `finetune.py`\n"
@@ -401,9 +511,7 @@ this order (also in `labels.json`): {", ".join(label_names)}.
 
 ## Splits
 
-Document IDs are assigned to splits by a seeded hash (seed {args.seed}), so all language
-versions of a document are in the same split. The realized shares are close to, but
-not exactly, the requested ratios.
+{split_text}
 
 | Split | Documents | Share | Requested |
 |---|---:|---:|---:|
@@ -466,6 +574,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val_ratio", type=float, default=0.1, help="Ratio of validation data.")
     parser.add_argument("--test_ratio", type=float, default=0.1, help="Ratio of test data.")
     parser.add_argument("--seed", type=int, default=42, help="Seed of the document-ID split hash.")
+    parser.add_argument(
+        "--stratify_by_language",
+        action="store_true",
+        help="Split every language in exactly the requested ratios instead of approximately "
+        "(reads the input once more to count the documents).",
+    )
     parser.add_argument("--log_level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
     return parser
 
@@ -507,6 +621,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         LOGGER.info("Input %s (language %s)", file, language_of(file))
     LOGGER.info("%d labels from %s", len(label_names), labels_path)
 
+    language_cuts = (
+        stratified_cuts(files, args.seed, args.train_ratio, args.val_ratio) if args.stratify_by_language else None
+    )
     include_url = not args.no_url
     LOGGER.info("URL column: %s", "yes" if include_url else "no (--no_url)")
     columns = {"id": datasets.Value("string"), "language": datasets.Value("string")}
@@ -537,6 +654,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "train_ratio": args.train_ratio,
                 "val_ratio": args.val_ratio,
                 "include_url": include_url,
+                "language_cuts": language_cuts,
             },
         )
         dataset_dict = datasets.DatasetDict(
