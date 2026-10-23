@@ -15,14 +15,28 @@ split evenly over the larger ones, so every language ends up with exactly
 warning, and so is a language none of whose codes has one. A language whose output
 file already exists is also skipped with a warning, unless ``--overwrite`` is given.
 
-The documents of a source in a bucket are taken from the start of its first shard,
-moving on to the next shard only when one runs out, so only the head of each file is
-read. The output is shuffled, so documents of different quality, source and language
-code are mixed.
+By default, the documents of a source in a bucket are taken from the start of its first
+shard, moving on to the next shard only when one runs out, so only the head of each file
+is read. With ``--scan-factor N`` (N > 1), up to N times as many documents as the source
+needs are read from the start of its files, and the sample is drawn at random among
+them; ``--scan-factor 0`` reads the whole source, so the sample is uniform over all of
+it. Reading takes about N times as long. The output is shuffled, so documents of
+different quality, source and language code are mixed.
 
 A document whose ID is already in the sample of the language is skipped, with a warning
-that counts them, and the next document of the same source takes its place. If the
-source has none left, the next larger source supplies the difference.
+that counts them, and the next document of the same source takes its place (with
+``--scan-factor``, the next one drawn). If the source has none left, the next larger
+source supplies the difference.
+
+``--method bernoulli`` replaces all of the above with a plain random sample: every
+document in every file of the language is kept with the same probability (``--ratio``),
+so the sample follows the composition of the full data, with no quotas per code, bucket
+or source. Without ``--ratio``, the documents are counted first and the ratio is set to
+draw slightly more than ``--sample-size`` documents. The drawn documents are shuffled
+and the first ``--sample-size`` of them kept, so the sample has exactly that size and is
+a simple random sample of the language. Every file is read in full (twice without
+``--ratio``); ``--workers`` reads files in parallel. A document whose ID is already in the
+sample is skipped.
 
 Outputs (in ``--output-dir``, ``<language>`` being the lower-cased language name):
     <language>.jsonl            the sampled documents in shuffled order, each with
@@ -35,14 +49,18 @@ Outputs (in ``--output-dir``, ``<language>`` being the lower-cased language name
 from __future__ import annotations
 
 import argparse
+import heapq
 import io
 import json
 import logging
+import math
 import random
 import re
 import shutil
 import subprocess
-from collections.abc import Hashable, Iterator, Mapping, Sequence
+from collections import Counter
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +86,7 @@ PROVENANCE_FIELDS = ("hplt_language_code", "hplt_quality_bucket", "hplt_source_f
 ZSTD_WINDOW_LOG_MAX = 31
 
 Key = TypeVar("Key", bound=Hashable)
+Result = TypeVar("Result")
 
 
 def zstd_backend() -> str:
@@ -152,6 +171,41 @@ def iter_head(paths: Sequence[Path], limit: int | None) -> Iterator[tuple[Path, 
                         break
         if line_number == 0:
             raise ValueError(f"{path}: no documents")
+
+
+def iter_candidates(
+    paths: Sequence[Path], need: int, scan_factor: int, rng: random.Random
+) -> Iterator[tuple[Path, int, bytes]]:
+    """Yield a source's documents in the order they are to be taken.
+
+    Args:
+        paths: The source's files, in shard order.
+        need: Number of documents the source has to supply.
+        scan_factor: 1 to yield the documents from the start of the files; N > 1 to
+            read up to ``N * need`` documents from the start and yield them in random
+            order; 0 to do the same over all documents of the source.
+        rng: Random generator for the order.
+
+    Yields:
+        The file, the 1-based line number in it, and the raw line of each document.
+    """
+    if scan_factor == 1:
+        yield from iter_head(paths, None)
+        return
+    # A few spare documents replace those skipped as duplicates of documents already sampled.
+    capacity = need + max(10, need // 100)
+    window = None if scan_factor == 0 else scan_factor * need
+    # Every document gets a uniform random key; the ones with the smallest keys are a uniform
+    # sample of the window. Max-heap on the key (negated), so the largest kept key goes first.
+    heap: list[tuple[float, int, Path, int, bytes]] = []
+    for index, (path, line_number, line) in enumerate(iter_head(paths, window)):
+        key = rng.random()
+        if len(heap) < capacity:
+            heapq.heappush(heap, (-key, index, path, line_number, line))
+        elif key < -heap[0][0]:
+            heapq.heapreplace(heap, (-key, index, path, line_number, line))
+    for _negated_key, _index, path, line_number, line in sorted(heap, key=lambda item: (-item[0], item[1])):
+        yield path, line_number, line
 
 
 def parse_record(line: bytes, source: str) -> dict[str, Any]:
@@ -255,6 +309,27 @@ def allocate_quotas(available: Mapping[Key, int], total: int) -> dict[Key, int]:
     return {stratum: quotas[stratum] for stratum in available}
 
 
+def selection_description(scan_factor: int) -> str:
+    """Describe for the manifest how the documents of each source were chosen."""
+    if scan_factor == 1:
+        return "first documents of each source in each quality bucket, in shard order"
+    if scan_factor == 0:
+        return "random documents among all documents of each source in each quality bucket"
+    return (
+        f"random documents among the first {scan_factor} times as many documents as needed "
+        "of each source in each quality bucket, in shard order"
+    )
+
+
+def write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
+    """Write records as JSONL through a temporary file, so an interrupted run leaves no partial output."""
+    temporary_path = path.with_name(path.name + ".tmp")
+    with temporary_path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    temporary_path.replace(path)
+
+
 def output_paths(output_dir: Path, name: str) -> tuple[Path, Path]:
     """Return the document and manifest paths of a language."""
     stem = "_".join(name.lower().split())
@@ -323,8 +398,10 @@ def sample_language(name: str, codes: Sequence[str], missing_codes: Sequence[str
         need = quotas[code][bucket][source] + carry
         taken = stratum_records[stratum]
         if need:
-            # Not limited to ``need`` documents, as duplicates among them are replaced.
-            with closing(iter_head(code_files[code][bucket][source], None)) as documents:
+            rng = random.Random(f"{args.seed}:{code}:{bucket}:{source}")
+            # More than ``need`` documents, as duplicates among them are replaced.
+            candidates = iter_candidates(code_files[code][bucket][source], need, args.scan_factor, rng)
+            with closing(candidates) as documents:
                 for path, line_number, line in documents:
                     location = f"{path}:{line_number}"
                     record = parse_record(line, location)
@@ -370,19 +447,15 @@ def sample_language(name: str, codes: Sequence[str], missing_codes: Sequence[str
     random.Random(f"{args.seed}:{name}").shuffle(records)
 
     output_path, manifest_path = output_paths(args.output_dir, name)
-    # Write to a temporary file first, so an interrupted run leaves no partial output.
-    temporary_path = output_path.with_name(output_path.name + ".tmp")
-    with temporary_path.open("w", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    temporary_path.replace(output_path)
+    write_jsonl(output_path, records)
 
     manifest = {
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "language": name,
         "input_dir": str(args.input_dir),
         "output": str(output_path),
-        "selection": "first documents of each source in each quality bucket, in shard order",
+        "selection": selection_description(args.scan_factor),
+        "scan_factor": args.scan_factor,
         "row_order": f"shuffled (seed {args.seed})",
         "requested_sample_size": args.sample_size,
         "sample_size": len(records),
@@ -427,6 +500,164 @@ def sample_language(name: str, codes: Sequence[str], missing_codes: Sequence[str
         )
 
 
+def count_documents(path: Path) -> int:
+    """Return the number of documents in a file.
+
+    Raises:
+        ValueError: If the file has no documents or a blank line.
+    """
+    return sum(1 for _ in iter_head([path], None))
+
+
+def bernoulli_file(path: Path, ratio: float, rng_seed: str) -> tuple[int, list[tuple[int, bytes]]]:
+    """Keep each document of a file with probability ``ratio``.
+
+    Returns:
+        The number of documents in the file, and the 1-based line number and raw line
+        of each kept document.
+
+    Raises:
+        ValueError: If the file has no documents or a blank line.
+    """
+    rng = random.Random(rng_seed)
+    documents = 0
+    kept: list[tuple[int, bytes]] = []
+    for _path, line_number, line in iter_head([path], None):
+        documents += 1
+        if rng.random() < ratio:
+            kept.append((line_number, line))
+    return documents, kept
+
+
+def parallel_map(function: Callable[..., Result], workers: int, *iterables: Iterable[Any]) -> Iterator[Result]:
+    """Map ``function`` over the iterables in order, in ``workers`` processes if more than one."""
+    if workers == 1:
+        yield from map(function, *iterables)
+        return
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        yield from pool.map(function, *iterables)
+
+
+def bernoulli_sample_language(
+    name: str, codes: Sequence[str], missing_codes: Sequence[str], args: argparse.Namespace
+) -> None:
+    """Sample one language by keeping every document with the same probability.
+
+    Args:
+        name: Language name, used for the output file names.
+        codes: Language codes to sample from; each has a directory in ``args.input_dir``.
+        missing_codes: Language codes of the language without a directory, for the manifest.
+        args: Parsed command-line arguments.
+
+    Raises:
+        ValueError: If the language has fewer documents than ``--sample-size`` (when the
+            ratio is derived from it) or a sampled record is unusable.
+    """
+    id_field: str = args.id_field
+    files = [
+        (code, bucket, path)
+        for code in codes
+        for bucket, source_files in find_data_files(args.input_dir / code).items()
+        for paths in source_files.values()
+        for path in paths
+    ]
+    paths = [path for _code, _bucket, path in files]
+    if args.ratio is not None:
+        ratio = args.ratio
+    else:
+        LOGGER.info("%s: counting the documents of %d files", name, len(files))
+        total = sum(parallel_map(count_documents, args.workers, paths))
+        if total < args.sample_size and not args.allow_fewer:
+            raise ValueError(
+                f"{name}: only {total} documents; --sample-size is {args.sample_size}. "
+                "Pass --allow-fewer to take all of them."
+            )
+        # Six standard deviations of the number drawn, so that drawing fewer than
+        # --sample-size documents is practically impossible.
+        margin = max(100, math.ceil(6 * math.sqrt(args.sample_size)))
+        ratio = min(1.0, (args.sample_size + margin) / total)
+        LOGGER.info("%s: %d documents; keeping each with probability %.6g", name, total, ratio)
+
+    seeds = [f"{args.seed}:{code}:{path.name}" for code, _bucket, path in files]
+    records: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    duplicates: list[str] = []
+    per_file: dict[str, dict[str, int]] = {}
+    results = parallel_map(bernoulli_file, args.workers, paths, [ratio] * len(paths), seeds)
+    for index, ((code, bucket, path), (documents, kept)) in enumerate(zip(files, results), start=1):
+        taken = 0
+        for line_number, line in kept:
+            location = f"{path}:{line_number}"
+            record = parse_record(line, location)
+            document_id = record.get(id_field)
+            if not isinstance(document_id, str) or not document_id:
+                raise ValueError(f"{location}: field {id_field!r} must be a non-empty string")
+            if document_id in seen_ids:
+                duplicates.append(f"{document_id} ({location})")
+                continue
+            seen_ids.add(document_id)
+            clashes = [field for field in PROVENANCE_FIELDS if field in record]
+            if clashes:
+                raise ValueError(f"{location}: record already has field(s) {', '.join(clashes)}")
+            record.update(zip(PROVENANCE_FIELDS, (code, bucket, path.name, line_number)))
+            records.append(record)
+            taken += 1
+        per_file[f"{code}/{path.name}"] = {"documents": documents, "documents_drawn": taken}
+        LOGGER.info("%s: [%d/%d] %s/%s: drew %d of %d documents", name, index, len(files), code, path.name, taken, documents)
+    if duplicates:
+        LOGGER.warning(
+            "%s: skipped %d document(s) whose ID was already sampled, e.g. %s",
+            name, len(duplicates), "; ".join(duplicates[:3]),
+        )
+    drawn = len(records)
+    if drawn < args.sample_size:
+        if not args.allow_fewer:
+            raise ValueError(
+                f"{name}: drew only {drawn} documents with distinct IDs (ratio {ratio:.6g}); --sample-size is "
+                f"{args.sample_size}. Pass a larger --ratio, or --allow-fewer to keep all of them."
+            )
+        LOGGER.warning("%s: drew only %d documents; keeping all of them", name, drawn)
+    # Shuffled, as the files hold the documents grouped by crawl; the first --sample-size
+    # of a shuffled random sample are themselves a random sample.
+    random.Random(f"{args.seed}:{name}").shuffle(records)
+    del records[args.sample_size:]
+    output_path, manifest_path = output_paths(args.output_dir, name)
+    write_jsonl(output_path, records)
+
+    sampled = Counter((record["hplt_language_code"], record["hplt_source_file"]) for record in records)
+    per_bucket: dict[str, dict[str, dict[str, int]]] = {code: {} for code in codes}
+    for code, bucket, path in files:
+        counts = per_file[f"{code}/{path.name}"]
+        counts["documents_sampled"] = sampled[code, path.name]
+        bucket_counts = per_bucket[code].setdefault(str(bucket), {"documents": 0, "documents_sampled": 0})
+        bucket_counts["documents"] += counts["documents"]
+        bucket_counts["documents_sampled"] += counts["documents_sampled"]
+    total_documents = sum(counts["documents"] for counts in per_file.values())
+    manifest = {
+        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "language": name,
+        "input_dir": str(args.input_dir),
+        "output": str(output_path),
+        "selection": "every document of every file kept with the same probability (Bernoulli sampling)",
+        "ratio": ratio,
+        "ratio_from": "--ratio" if args.ratio is not None else "slightly more than --sample-size / documents",
+        "row_order": f"shuffled (seed {args.seed}), then cut to --sample-size",
+        "requested_sample_size": args.sample_size,
+        "documents_drawn": drawn,
+        "sample_size": len(records),
+        "documents": total_documents,
+        "missing_language_codes": list(missing_codes),
+        "id_field": id_field,
+        "duplicate_ids_skipped": len(duplicates),
+        "buckets": per_bucket,
+        "files": per_file,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    LOGGER.info(
+        "%s: wrote %d of %d documents (ratio %.6g) to %s", name, len(records), total_documents, ratio, output_path
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
     parser = argparse.ArgumentParser(description="Sample HPLT documents per language, stratified by quality bucket.")
@@ -450,7 +681,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", type=Path, default=Path("data/hplt_noisy_sample"))
     parser.add_argument("--sample-size", type=int, default=10_000, help="Documents to sample per language")
-    parser.add_argument("--seed", type=int, default=0, help="Seed for the order of the output")
+    parser.add_argument("--seed", type=int, default=0, help="Seed for the random choices and the order of the output")
+    parser.add_argument(
+        "--scan-factor",
+        type=int,
+        default=1,
+        help="Draw each source's documents at random from the first N times as many as it needs "
+        "(0: from all of them); 1 takes the first documents (default). Reading takes about N times as long",
+    )
+    parser.add_argument(
+        "--method",
+        choices=("stratified", "bernoulli"),
+        default="stratified",
+        help="stratified: quotas per code, bucket and source (default); bernoulli: keep every document "
+        "with the same probability, reading every file in full",
+    )
+    parser.add_argument(
+        "--ratio",
+        type=float,
+        default=None,
+        help="Bernoulli only: probability of keeping each document "
+        "(default: --sample-size divided by the language's document count, which takes an extra pass)",
+    )
+    parser.add_argument("--workers", type=int, default=1, help="Bernoulli only: files to read in parallel")
     parser.add_argument(
         "--id-field",
         default="id",
@@ -476,6 +729,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s [%(levelname)s] %(message)s")
     if args.sample_size < 1:
         raise ValueError("--sample-size must be >= 1")
+    if args.scan_factor < 0:
+        raise ValueError("--scan-factor must be >= 0")
+    if args.workers < 1:
+        raise ValueError("--workers must be >= 1")
+    if args.method == "bernoulli":
+        if args.scan_factor != 1:
+            raise ValueError("--scan-factor applies to --method stratified only")
+        if args.ratio is not None and not 0.0 < args.ratio <= 1.0:
+            raise ValueError("--ratio must be in (0, 1]")
+    elif args.ratio is not None or args.workers != 1:
+        raise ValueError("--ratio and --workers apply to --method bernoulli only")
     LOGGER.info("Decompressing with %s", zstd_backend())
 
     language_codes = read_language_codes(args.languages_file)
@@ -510,9 +774,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    sample = bernoulli_sample_language if args.method == "bernoulli" else sample_language
     for name, codes in present.items():
         if codes:
-            sample_language(name, codes, missing[name], args)
+            sample(name, codes, missing[name], args)
 
     # Repeat the warnings at the end of the log, where they are easy to find.
     if existing:
