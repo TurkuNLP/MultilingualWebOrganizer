@@ -40,11 +40,15 @@ LOGGER = logging.getLogger(__name__)
 
 
 def normalize_language(language: str) -> str:
-    """Normalize a language name to initial-capital form."""
-    normalized = language.strip().capitalize()
+    """Normalize a language name to initial-capital form.
+
+    Only the first letter is changed, so multi-word names keep their capitals
+    ("Simplified Chinese", not "Simplified chinese").
+    """
+    normalized = language.strip()
     if not normalized:
         raise ValueError("language must not be empty")
-    return normalized
+    return normalized[0].upper() + normalized[1:]
 
 
 def normalize_label_type(label_type: str) -> str:
