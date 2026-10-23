@@ -17,6 +17,10 @@
 #   sbatch sample_hplt_by_quality.sh [extra sample_hplt_by_quality.py args]
 # e.g. sbatch sample_hplt_by_quality.sh --languages Maltese Norwegian
 #      sbatch sample_hplt_by_quality.sh --overwrite
+#      sbatch sample_hplt_by_quality.sh --scan-factor 10 --output-dir <another directory>
+# --scan-factor N draws the documents at random from the first N times as many as needed
+# (0: from all of them) instead of taking the first ones; reading takes about N times as
+# long, so raise --time for large N.
 #
 # Reads the languages and their language codes from data/oellm_languages.txt and
 # writes data/hplt_<data_quality>_sample/<language>.jsonl and <language>.manifest.json.
