@@ -9,14 +9,14 @@ The code runs on the CSC supercomputers Roihu and LUMI, through SLURM.
 - **Labelling model chosen: Qwen3.8-27B.** It was compared with four other open models, a decision model built on it (Clef), two OpenAI models and a human annotator. The evidence is in `docs/labelling_model_recommendation.md`.
 - **HPLT 4.0 samples are ready on LUMI** for the OpenEuroLLM languages: 100,000 documents per language from HPLT's clean and noisy collections, and 10,000 from the poor collection. Latvian and Norwegian were since split into Latvian and Latgalian, and Norwegian Bokmål and Nynorsk; these four still need sampling under their new names.
 - **Next: labelling these samples** with Qwen3.8-27B on LUMI.
-- **Proposed wider language set: 125 languages** in `data/qwen_label_languages.txt`. These are the OpenEuroLLM languages plus languages on Qwen3's official list or in mmBERT's pre- and mid-training data. They have not been sampled yet.
+- **Proposed wider language set: 128 languages** in `data/qwen_label_languages.txt`, one language code each (Simplified and Traditional Chinese, Serbian Cyrillic and Latin, and Banjar Arabic and Latin are separate languages). These are the OpenEuroLLM languages plus languages on Qwen3's official list or in mmBERT's pre- and mid-training data. They have not been sampled yet.
 - **Classifier training** (`scripts/model_training/`) is implemented but has not been run yet.
 
 ## How it works
 
-1. **Sample documents.** `scripts/data_processing/sample_hplt_by_quality.py` draws a sample per language from one of HPLT 4.0's collections (clean, noisy or poor), stratified by HPLT's quality bucket. The languages come from a file of `Language: code [code ...]` lines. The sample is split evenly over a language's codes, then its quality buckets, then the sources within a bucket, taken from the start of each file. A document whose ID is already in the sample is skipped, and the output is shuffled. It runs on LUMI via `hpc/lumi/sample_hplt_by_quality.sh`. The Roihu copy is in `data/hplt4/<language>.jsonl`: 5,000 documents for each of 36 languages.
+1. **Sample documents.** `scripts/data_processing/sample_hplt_by_quality.py` draws a sample per language from one of HPLT 4.0's collections (clean, noisy or poor), stratified by HPLT's quality bucket. The languages come from a file of `Language: code [code ...]` lines. The sample is split evenly over a language's codes, then its quality buckets, then the sources within a bucket. By default the documents are taken from the start of each file; with `--scan-factor N` they are drawn at random from the first N times as many as needed (`0`: from the whole source). The files hold their documents grouped by crawl, so the start of a file is not representative. `--method bernoulli` therefore instead keeps every document of every file with the same probability, with no quotas, so the sample follows the composition of the full data. A document whose ID is already in the sample is skipped, and the output is shuffled. It runs on LUMI via `hpc/lumi/sample_hplt_by_quality.sh`. The Roihu copy is in `data/hplt4/<language>.jsonl`: 5,000 documents for each of 36 languages.
 2. **Label them with label distributions.** `scripts/data_processing/generate_label_distributions.py` shows the model the label list under single-letter IDs, with worked examples, and reads the probabilities of the answer letters in one forward pass (vLLM). Each document gets a probability for every label, normalised the same way as in WebOrganizer.
-3. **Build training data.** `scripts/model_training/create_datasets.py` turns the label files into train, validation and test splits. It splits by document ID, so the translations of a document never end up in different splits.
+3. **Build training data.** `scripts/model_training/create_datasets.py` turns the label files into train, validation and test splits. It splits by document ID, so the translations of a document never end up in different splits. With `--stratify_by_language`, every language is split in exactly the requested ratios instead of approximately, which matters for small languages.
 4. **Train the classifier.** `scripts/model_training/finetune.py` fine-tunes mmBERT (`jhu-clsp/mmBERT-base`) with cross-entropy against the label distributions. As in WebOrganizer's default classifiers, the input is the URL, a blank line, and the text; URLs are percent-decoded first. A dataset made with `create_datasets.py --no_url` has no URLs and gives a text-only classifier. `--template` overrides the input, and the template is saved in the model's `config.json`. `hp_search.py` and `summarize_hp_search.py` run a random hyperparameter search, one trial per SLURM array task.
 5. **Evaluate.** `scripts/data_analysis/` and `notebooks/` compare models with each other, across languages, with WebOrganizer's labels and with human labels.
 
@@ -75,19 +75,36 @@ HPLT 4.0 is read from `/appl/local/openeurollm/training/catalogue/hplt/4.0/<coll
 ```bash
 cd /scratch/project_462001516/users/tarkkaot/MultilingualWebOrganizer/hpc/lumi
 
-# Sample 100,000 documents per language into data/hplt_<data_quality>_sample/
+# Random samples of 30,000 documents for each of the 128 languages of
+# data/qwen_label_languages.txt with hplt-sampler: submit one run per language code
+# (4 at a time), then collect them into data/hplt_<collection>_random_sample/
+bash submit_hplt_sampler.sh clean 4
+sbatch collect_hplt_samples.sh clean        # once the runs have finished; the same for noisy
+
+# Or, without hplt-sampler, Bernoulli samples: one task per language and collection
+sbatch sample_hplt_bernoulli.sh
+
+# Then reuse earlier labels for them (once all samples are ready)
+sbatch reuse_hplt_labels.sh
+
+# Stratified samples of 100,000 documents per language into data/hplt_<data_quality>_sample/
 sbatch sample_hplt_by_quality.sh
 sbatch sample_hplt_by_quality.sh --languages Latvian Latgalian "Norwegian Bokmål" "Norwegian Nynorsk" --overwrite
 
-# Label the samples: 76 tasks, 38 languages x {topic, format}, 2 GPUs each
+# Label the samples: 256 tasks, 128 languages x {topic, format}, 2 GPUs each
 sbatch array_generate_distribution_hplt.sh [max_documents]
 
-# One small test task first: Maltese (task 15), topic, 500 documents
-sbatch --array=15 array_generate_distribution_hplt.sh 500
+# One small test task first: Maltese (task 79), topic, 500 documents
+sbatch --array=79 array_generate_distribution_hplt.sh 500
 ```
 
 - **Sampling** reads its languages from `data/oellm_languages.txt`; pass `--languages-file` for another list. A language whose sample file exists is skipped with a warning, so a rerun only adds missing languages; `--overwrite` replaces them. Language codes with no HPLT directory are reported as warnings, and the job still succeeds. Each language also gets a `<language>.manifest.json` with the files read and the documents taken per code, bucket and source.
-- **Labelling** uses `configs/lumi/distribution/generate_hplt.yaml` and always Qwen/Qwen3.8-27B, with tensor parallelism over the job's GPUs. Its 38 languages are written into the script under their sample-file names (e.g. `norwegian_bokmål`); with a different language list, update the list and `--array` (2 × the number of languages). Results go to `results/distribution/Qwen3.8-27B-hplt-annotations/<data_quality>/<label type>/<language>.jsonl`.
+- **hplt-sampler** ([TurkuNLP/hplt-sampler](https://github.com/TurkuNLP/hplt-sampler)) is cloned next to this repository, in `/scratch/project_462001516/users/tarkkaot/hplt-sampler`, with `hplt-sampler.conf` copied from `presets/lumi.conf` (`ACCOUNT` set). It samples each shard in proportion to its document count, reading every shard in full in parallel array jobs. Noisy runs need the fix on its branch `fix-collection-clash`, which keeps them apart from clean runs; `submit_hplt_sampler.sh` refuses to submit noisy runs without it. With several runs at once, set `BATCH` in `hplt-sampler.conf` to about 180 divided by their number, as they share the queue limits.
+- **Collecting** (`collect_hplt_samples.sh`) copies each language's run into `data/hplt_<collection>_random_sample/<language>.jsonl`. Every language of `data/qwen_label_languages.txt` has one code; with a list where a language has several, it gets 30,000 documents split over its codes in proportion to their document counts, then shuffled. A language with fewer than 30,000 documents in a collection gets all of them. It stops on an unfinished or unshuffled run, or a repeated document ID; `--allow-incomplete` collects the finished languages and skips the rest.
+- **Bernoulli sampling** (`sample_hplt_bernoulli.sh`) reads every file in full, twice: once to count the documents and set the probability to draw slightly more than 30,000, once to sample. The drawn documents are shuffled and the first 30,000 kept, so each sample has exactly 30,000 documents and is a simple random sample of the language. Each task reads its files with one worker per CPU; the 24-hour limit is a guess, so check the first tasks before running all 76.
+- **Reusing earlier labels:** after the random samples are made and before labelling them, `sbatch reuse_hplt_labels.sh` copies the existing results whose document ID, text and URL match a sample document into `results/distribution/Qwen3.8-27B-hplt-annotations/{clean,noisy}_random/`, and moves those documents to the top of the sample file. Labelling with `data_quality=clean_random` (or `noisy_random`) then skips them. Label the whole sample: the reused documents are not a random subset, so a run that stops early is tilted towards them.
+- **More random samples:** by default the sample is the first documents of each file, which can be dominated by a few websites. `--scan-factor N` draws them at random from the first N times as many documents as needed, and `--scan-factor 0` from all of them, at about N times the reading time. Pass a different `--output-dir` (or `--overwrite`) to keep it apart from the existing samples.
+- **Labelling** uses `configs/lumi/distribution/generate_hplt.yaml` and always Qwen/Qwen3.8-27B, with tensor parallelism over the job's GPUs. It reads its languages from `languages_file` in the script, by default the 128 of `data/qwen_label_languages.txt`: task N is language N of the file (topic), task 128 + N its format labels. For the earlier 38-language clean, noisy and poor samples, set it to `data/oellm_languages.txt` and `--array` to `0-75`. Results go to `results/distribution/Qwen3.8-27B-hplt-annotations/<data_quality>/<label type>/<language>.jsonl`.
 - **Speed:** a Maltese test labelled about 0.8–0.9 documents per second on 2 GPUs, so a task covers roughly 25,000 documents in its 8-hour limit. Resubmit a task to continue; it resumes where it stopped.
 - `array_generate_WO_labels.sh` runs the earlier hard-label pipeline (`generate_multilabel.py`) on the parallel MT-Nemotron-CC documents.
 
