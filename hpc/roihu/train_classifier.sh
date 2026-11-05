@@ -37,6 +37,20 @@
 # WebOrganizer's default classifiers, URLs percent-decoded) if it has a url column,
 # the text alone if it was made with create_datasets.sh ... --no_url. Override with
 # --template. The template is saved in the model's config.json.
+#
+# Weights & Biases (optional; off by default): WANDB=online reports the run as it
+# trains, WANDB=offline writes it to <output dir>/wandb/ for `wandb sync` later, e.g.
+#   WANDB=online sbatch train_classifier.sh topic hplt-v1 mmbert-mean
+#   WANDB=online WANDB_PROJECT=my-project TRAIN_DOCUMENTS=1000000 sbatch ... train_classifier.sh ...
+# The W&B run is named <label type>/<dataset_name>/<run_name>, grouped by label type and
+# dataset, and gets the training and evaluation curves, all finetune.py arguments, and
+# the test metrics (overall, per language and per source). A resubmitted run continues
+# the same W&B run (its ID is kept in <output dir>/wandb_run_id). Before the first
+# online run, run `wandb login` once on a login node (it saves the key in ~/.netrc;
+# never put the key in this script), and check that the module has wandb:
+#   module load python-vllm/0.19.1 && python -c "import wandb"
+# (if not: pip install --user wandb). If compute nodes can't reach wandb.ai, use
+# WANDB=offline and sync from a login node: wandb sync <output dir>/wandb/offline-run-*
 
 set -euo pipefail
 
@@ -58,6 +72,48 @@ output_dir="$base_dir/results/models/$label_type/$dataset_name/$run_name"
 echo "Dataset: $dataset_dir"
 echo "Output:  $output_dir"
 nvidia-smi --query-gpu=name,memory.total --format=csv
+
+# Comment out to disable W&B reporting
+WANDB="online"
+WANDB_PROJECT="multilingual-weborganizer-finetune"
+
+# Reporting: none unless WANDB is online or offline.
+report_args=(--report_to none)
+case "${WANDB:-}" in
+    "") ;;
+    online|offline)
+        if ! python -c "import wandb" 2>/dev/null; then
+            echo "WANDB=$WANDB, but the python-vllm module has no wandb; install it with pip install --user wandb" >&2
+            exit 1
+        fi
+        if [[ "$WANDB" == online && -z "${WANDB_API_KEY:-}" ]] && ! grep -qs "api.wandb.ai" "$HOME/.netrc"; then
+            echo "WANDB=online, but no W&B key is set up; run wandb login on a login node first" >&2
+            exit 1
+        fi
+        export WANDB_MODE="$WANDB"
+        export WANDB_PROJECT="${WANDB_PROJECT:-multilingual-weborganizer}"
+        export WANDB_RUN_GROUP="$label_type/$dataset_name"
+        export WANDB_TAGS="$label_type,$dataset_name"
+        # Run files next to the model, caches in scratch rather than the small home directory.
+        export WANDB_DIR="$output_dir"
+        export WANDB_CACHE_DIR="$base_dir/cache/wandb"
+        export WANDB_DATA_DIR="$base_dir/cache/wandb-data"
+        mkdir -p "$output_dir" "$WANDB_CACHE_DIR" "$WANDB_DATA_DIR"
+        # One W&B run per output directory, so a resubmitted (resumed) job continues it.
+        run_id_file="$output_dir/wandb_run_id"
+        if [[ ! -s "$run_id_file" ]]; then
+            python -c "import wandb.util; print(wandb.util.generate_id())" > "$run_id_file"
+        fi
+        export WANDB_RUN_ID="$(<"$run_id_file")"
+        export WANDB_RESUME=allow
+        report_args=(--report_to wandb --run_name "$label_type/$dataset_name/$run_name")
+        echo "W&B: $WANDB_MODE, project $WANDB_PROJECT, run $label_type/$dataset_name/$run_name (ID $WANDB_RUN_ID)"
+        ;;
+    *)
+        echo "WANDB must be online, offline or unset, got '$WANDB'" >&2
+        exit 1
+        ;;
+esac
 
 if [[ -n "${MAX_STEPS:-}${EVAL_STEPS:-}" ]]; then
     echo "MAX_STEPS and EVAL_STEPS were replaced by TRAIN_DOCUMENTS and EVALUATIONS" >&2
@@ -114,7 +170,7 @@ python "$python_script" \
     --metric_for_best_model js_divergence_bits \
     --greater_is_better false \
     --logging_steps 50 \
-    --report_to none \
+    "${report_args[@]}" \
     --dataloader_num_workers 8 \
     --preprocessing_num_workers 16 \
     --seed 42 \

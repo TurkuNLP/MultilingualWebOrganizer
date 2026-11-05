@@ -20,8 +20,9 @@ Changes from the WebOrganizer script:
   labels raise an error instead of being trained on.
 * Evaluation adds KL and Jensen-Shannon divergence and the Brier score to the accuracy
   metrics; labels without examples are reported in a warning instead of producing NaN.
-* Test predictions are written to ``predictions.jsonl`` (document ID, language, label
-  probabilities), with metrics per language.
+* Test predictions are written to ``predictions.jsonl`` (document ID, language, source
+  if the dataset has one, label probabilities), with metrics per language and per source
+  (``test_source_<source>_<metric>``; the source is e.g. the HPLT collection).
 * The label temperature applies to the training loss only; evaluation always compares
   with the original label distributions, so runs with different temperatures are
   comparable.
@@ -99,8 +100,8 @@ logger = logging.getLogger(__name__)
 # The distribution pipeline accepts label probabilities that sum to 1 within this tolerance.
 PROBABILITY_SUM_TOLERANCE = 1e-3
 # Columns kept next to the token IDs, so predictions can be matched to documents.
-ID_COLUMNS = ("id", "language")
-# Metrics reported per language for the test set; the per-label accuracies are left out.
+ID_COLUMNS = ("id", "language", "source")
+# Metrics reported per language and per source for the test set; the per-label accuracies are left out.
 SUMMARY_METRICS = (
     "accuracy",
     "accuracy_label_average",
@@ -640,7 +641,7 @@ class SoftClassificationTrainer(Trainer):
         With ``train_sampling_strategy="group_by_length"``, transformers 5 also shuffles
         evaluation batches by length. The evaluation sets are sorted by length instead
         (see ``main``), which saves as much padding and keeps predictions in the order
-        of the dataset's ``id`` and ``language`` columns.
+        of the dataset's ``id``, ``language`` and ``source`` columns.
         """
         if self.args.world_size <= 1:
             return SequentialSampler(eval_dataset)
@@ -727,14 +728,17 @@ def write_predictions(
     probs = np.exp(shifted) / np.exp(shifted).sum(axis=-1, keepdims=True)
     ids = dataset["id"] if "id" in dataset.column_names else [None] * len(dataset)
     languages = dataset["language"] if "language" in dataset.column_names else [None] * len(dataset)
+    # Datasets made before the source column have none; their records leave it out.
+    sources = dataset["source"] if "source" in dataset.column_names else None
     with path.open("w", encoding="utf-8") as handle:
-        for doc_id, language, row in zip(ids, languages, probs):
-            record = {
-                "id": doc_id,
-                "language": language,
+        for index, (doc_id, language, row) in enumerate(zip(ids, languages, probs)):
+            record = {"id": doc_id, "language": language}
+            if sources is not None:
+                record["source"] = sources[index]
+            record.update({
                 "label": label_names[int(np.argmax(row))],
                 "label_probs": {name: float(value) for name, value in zip(label_names, row)},
-            }
+            })
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
@@ -1071,12 +1075,26 @@ def main() -> None:
                     {f"test_{language}_{name}": language_metrics[name] for name in SUMMARY_METRICS
                      if name in language_metrics}
                 )
+        # The "source_" prefix keeps a source's metrics apart from a language of the same name.
+        if "source" in test_dataset.column_names:
+            sources = np.asarray(test_dataset["source"])
+            for source in sorted(set(sources)):
+                mask = sources == source
+                source_metrics = soft_label_metrics(output.predictions[mask], output.label_ids[mask], label_names)
+                metrics.update(
+                    {f"test_source_{source}_{name}": source_metrics[name] for name in SUMMARY_METRICS
+                     if name in source_metrics}
+                )
 
         if trainer.is_world_process_zero():
             write_predictions(output_dir / "predictions.jsonl", test_dataset, output.predictions, label_names)
 
         trainer.log_metrics("pred", metrics)
         trainer.save_metrics("pred", metrics)
+        # Trainer.predict doesn't pass its metrics to the reporting integrations, so
+        # with e.g. --report_to wandb the test results would be missing from the run.
+        if [name for name in (args.report_to or []) if name != "none"]:
+            trainer.log(metrics)
 
 
 if __name__ == "__main__":
