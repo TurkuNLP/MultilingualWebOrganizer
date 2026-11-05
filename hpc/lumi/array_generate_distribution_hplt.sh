@@ -2,7 +2,7 @@
 #SBATCH --job-name=distribution_hplt
 #SBATCH --account=project_462001516
 #SBATCH --partition=small-g
-#SBATCH --time=14:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=14 # 7 per GPU
