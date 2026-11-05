@@ -61,8 +61,11 @@ sbatch array_generate_distribution.sh Qwen/Qwen3.8-27B 2000
 # Build a dataset from a labelling run, then train (or search hyperparameters)
 sbatch create_datasets.sh Qwen3.8-27B-hplt-annotations topic hplt-v1
 sbatch train_classifier.sh topic hplt-v1 mmbert
+WANDB=online sbatch train_classifier.sh topic hplt-v1 mmbert   # also report to Weights & Biases
 sbatch --array=0-15%4 hp_search_classifier.sh topic hplt-v1 search1
 ```
+
+Reporting to Weights & Biases is off by default. `WANDB=online` (or `offline`, to sync later with `wandb sync`) turns it on for `train_classifier.sh`; run `wandb login` once on a login node first. The header of `train_classifier.sh` has the details.
 
 Interrupted labelling runs resume from what they have written: resubmit the same command. A labelling job that completes no batch for 20 minutes (`--stall-timeout-minutes`, config `run.stall_timeout_minutes`) exits with code 1 and writes a traceback of where it hung to its `.err` log, instead of holding its GPUs until the time limit. On LUMI, the scripts in `hpc/lumi/` run the same code in a Singularity image; see the next section.
 
@@ -96,6 +99,10 @@ sbatch array_generate_distribution_hplt.sh [max_documents]
 
 # One small test task first: Maltese (task 79), topic, 500 documents
 sbatch --array=79 array_generate_distribution_hplt.sh 500
+
+# Build a dataset per label type: per language 25,000 clean, 25,000 noisy, 10,000 poor documents
+sbatch create_hplt_dataset.sh topic hplt-random-v1
+sbatch create_hplt_dataset.sh format hplt-random-v1
 ```
 
 - **Sampling** reads its languages from `data/oellm_languages.txt`; pass `--languages-file` for another list. A language whose sample file exists is skipped with a warning, so a rerun only adds missing languages; `--overwrite` replaces them. Language codes with no HPLT directory are reported as warnings, and the job still succeeds. Each language also gets a `<language>.manifest.json` with the files read and the documents taken per code, bucket and source.
@@ -106,6 +113,7 @@ sbatch --array=79 array_generate_distribution_hplt.sh 500
 - **More random samples:** by default the sample is the first documents of each file, which can be dominated by a few websites. `--scan-factor N` draws them at random from the first N times as many documents as needed, and `--scan-factor 0` from all of them, at about N times the reading time. Pass a different `--output-dir` (or `--overwrite`) to keep it apart from the existing samples.
 - **Labelling** uses `configs/lumi/distribution/generate_hplt.yaml` and always Qwen/Qwen3.8-27B, with tensor parallelism over the job's GPUs. It reads its languages from `languages_file` in the script, by default the 128 of `data/qwen_label_languages.txt`: task N is language N of the file (topic), task 128 + N its format labels. For the earlier 38-language clean, noisy and poor samples, set it to `data/oellm_languages.txt` and `--array` to `0-75`. Results go to `results/distribution/Qwen3.8-27B-hplt-annotations/<data_quality>/<label type>/<language>.jsonl`.
 - **Speed:** a Maltese test labelled about 0.8–0.9 documents per second on 2 GPUs, so a task covers roughly 25,000 documents in its 8-hour limit. Resubmit a task to continue; it resumes where it stopped.
+- **Datasets** (`create_hplt_dataset.sh`) run `create_datasets.py` on the clean, noisy and poor random results with `--max_per_file 25000 25000 10000`: the first documents of each result file, a random subset because the labelling follows the shuffled sample order. A file with fewer documents is used whole, with a warning in the log. A language's documents from the three collections are split together, 80/10/10 per language (`--stratify_by_language`), into `results/datasets/<label type>/<dataset_name>`. The `source` column (`clean_random`, `noisy_random` or `poor_random`) records the collection, and `finetune.py` reports test metrics per source as well as per language.
 - `array_generate_WO_labels.sh` runs the earlier hard-label pipeline (`generate_multilabel.py`) on the parallel MT-Nemotron-CC documents.
 
 ## Output format
