@@ -18,7 +18,7 @@
 #
 # Reads results/distribution/<annotation_run>/<label type>/*.jsonl (one file per
 # language) and writes results/datasets/<label type>/<dataset_name> with the columns
-# id, language, url, text and labels. Splits are by a seeded hash of the document ID
+# id, language, source (here <annotation_run>), url, text and labels. Splits are by a seeded hash of the document ID
 # (80/10/10 by default), so translations of a document in the parallel data land in
 # the same split. Every record needs a url field (null if it has no URL), unless
 # --no_url leaves the URL out; finetune.py then trains on the text alone.

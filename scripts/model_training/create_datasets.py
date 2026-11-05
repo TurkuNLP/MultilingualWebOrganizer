@@ -4,10 +4,17 @@ The inputs are the JSONL files written by
 ``scripts/data_processing/generate_label_distributions.py``: one record per document
 with its text, the URL shown in the prompt, and a probability per label
 (``label_probs``, keyed by label short name). Each record becomes one row with the
-document ID, its language, its URL, its text, and a ``labels`` vector of probabilities
-in label-file order, the training target of ``finetune.py``. The language is the file
-name up to the first hyphen (``finnish.jsonl`` and ``finnish-parallel.jsonl`` are both
-``finnish``).
+document ID, its language, its source, its URL, its text, and a ``labels`` vector of
+probabilities in label-file order, the training target of ``finetune.py``. The language
+is the file name up to the first hyphen (``finnish.jsonl`` and ``finnish-parallel.jsonl``
+are both ``finnish``).
+
+The source tells which ``--input`` path a row came from, e.g. the HPLT collection, so
+results can be reported per source. ``--source_names`` names the inputs, one name per
+path. Without it, a source is the name of the input's directory (for a file input, the
+directory it is in), or the name of the directory above it if that directory is named
+after the label type: ``results/distribution/<run>/clean_random/topic`` is
+``clean_random``, and ``results/distribution/<run>/topic`` is ``<run>``.
 
 The URL is stored unchanged, or as null when the labelling run had none for the
 document. ``finetune.py`` then uses WebOrganizer's ``{url}\\n\\n{text}`` input by
@@ -33,8 +40,19 @@ documents. A document ID present in several languages must still land in the sam
 in all of them; if the cuts would separate translations, the script stops (parallel data
 with the same documents in every language is split identically either way).
 
-Rows are stored in input order: one block per language (files in name order), each in
-file order. Training doesn't depend on that order: ``finetune.py``'s length-grouped
+``--max_per_file`` caps the documents taken from each file, with one value for all inputs
+or one per ``--input`` path. The first N records of a file are used, and a file with
+fewer records is used whole (with a warning). Taking the first N records gives a random
+subset only if the file is in random order. The HPLT result files are: their samples are
+shuffled, and the labelling run processes a sample in order. For example, to take 25,000
+documents per language from clean and noisy and 10,000 from poor:
+``--input <run>/clean_random/topic <run>/noisy_random/topic <run>/poor_random/topic
+--max_per_file 25000 25000 10000``. Files of the same name in several inputs are the
+same language, so a language's rows combine all three collections and are split
+together. A document ID repeated across the inputs of a language stops the script.
+
+Rows are stored in input order: the inputs in the order given, the files of a directory
+in name order, and each file in file order. Training doesn't depend on that order: ``finetune.py``'s length-grouped
 sampler draws a new random permutation of the whole training split every epoch, and
 ``--max_train_samples`` takes a seeded random subset.
 
@@ -44,8 +62,9 @@ have to fit in memory. Malformed records raise an error instead of being skipped
 Outputs (in ``--output_dir``): a ``datasets.DatasetDict`` saved with
 ``save_to_disk`` (splits ``train``, ``validation``, ``test``), ``labels.json`` with
 the label names in target order, ``README.md`` describing how the data was made (split
-sizes, documents per language, and the label distribution of every split), and
-``label_counts.tsv`` with the label distribution per split and language.
+sizes, documents per source and per language, and the label distribution of every
+split), and ``label_counts.tsv`` with the label distribution per split, source, and
+language.
 
 In the label statistics, a document's top label is its highest-probability label (the
 first in label order on a tie, as in ``finetune.py``'s accuracy). Its soft count adds
@@ -131,6 +150,95 @@ def find_input_files(inputs: Sequence[Path]) -> list[Path]:
     return files
 
 
+def input_file_limits(inputs: Sequence[Path], max_per_file: Sequence[int] | None) -> dict[str, int | None]:
+    """Return the maximum number of records to read from each input file.
+
+    Args:
+        inputs: The ``--input`` paths (files or directories), in order.
+        max_per_file: None for no limit, one limit for every input, or one per input.
+
+    Returns:
+        A mapping from each input file (as a string, as ``generate_rows`` receives
+        it) to its limit, or None to read the whole file.
+
+    Raises:
+        ValueError: If the number of limits matches neither 1 nor the number of inputs.
+    """
+    if max_per_file is None:
+        limits: list[int | None] = [None] * len(inputs)
+    elif len(max_per_file) == 1:
+        limits = [max_per_file[0]] * len(inputs)
+    elif len(max_per_file) == len(inputs):
+        limits = list(max_per_file)
+    else:
+        raise ValueError(
+            f"--max_per_file has {len(max_per_file)} values for {len(inputs)} --input paths; "
+            "give one value for all of them or one per path"
+        )
+    return {str(file): limit for path, limit in zip(inputs, limits) for file in find_input_files([path])}
+
+
+def default_source_name(path: Path, label_type: str) -> str:
+    """Return the source name of an input path when ``--source_names`` is not given.
+
+    It is the name of the input's directory (for a file, the directory it is in), or of
+    the directory above it if that directory is named after the label type, e.g.
+    ``clean_random`` for ``results/distribution/<run>/clean_random/topic``.
+
+    Raises:
+        ValueError: If the path gives no directory name to use.
+    """
+    directory = path.resolve() if path.is_dir() else path.resolve().parent
+    if directory.name == label_type:
+        directory = directory.parent
+    if not directory.name:
+        raise ValueError(f"Cannot name the source of {path}; give --source_names")
+    return directory.name
+
+
+def input_file_sources(
+    inputs: Sequence[Path], source_names: Sequence[str] | None, label_type: str
+) -> dict[str, str]:
+    """Return the source name of each input file.
+
+    Args:
+        inputs: The ``--input`` paths (files or directories), in order.
+        source_names: One name per input, or None to name them with ``default_source_name``.
+        label_type: The label type, which the default names skip as a directory name.
+
+    Returns:
+        A mapping from each input file (as a string, as ``generate_rows`` receives it)
+        to the source name of its input.
+
+    Raises:
+        ValueError: If the number of names doesn't match the number of inputs, or a name is empty.
+    """
+    if source_names is None:
+        names = [default_source_name(path, label_type) for path in inputs]
+    elif len(source_names) == len(inputs):
+        names = list(source_names)
+    else:
+        raise ValueError(f"--source_names has {len(source_names)} names for {len(inputs)} --input paths; "
+                         "give one per path")
+    if any(not name.strip() for name in names):
+        raise ValueError(f"Source names must not be empty: {names}")
+    return {str(file): name for path, name in zip(inputs, names) for file in find_input_files([path])}
+
+
+def read_lines(path: Path, limit: int | None) -> Iterator[tuple[int, str]]:
+    """Yield the line numbers (from 1) and lines of a file, stopping after ``limit`` lines.
+
+    Args:
+        path: The JSONL file.
+        limit: The number of lines to read, or None to read them all.
+    """
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if limit is not None and line_number > limit:
+                return
+            yield line_number, line
+
+
 def language_of(path: Path) -> str:
     """Return the language encoded in a result file name, e.g. ``finnish-parallel.jsonl``."""
     return path.stem.split("-", 1)[0]
@@ -179,13 +287,25 @@ def read_document_id(line: str, where: str) -> str:
 
 
 def stratified_cuts(
-    files: Sequence[Path], seed: int, train_ratio: float, val_ratio: float
+    files: Sequence[Path],
+    seed: int,
+    train_ratio: float,
+    val_ratio: float,
+    file_limits: dict[str, int | None] | None = None,
 ) -> dict[str, tuple[float, float]]:
     """Return, per language, the hash positions that split it in exactly the requested ratios.
 
     Within a language, the documents are ordered by their hash position; the first
     ``round(train_ratio * n)`` go to ``train`` and the documents up to
     ``round((train_ratio + val_ratio) * n)`` to ``validation``, the rest to ``test``.
+
+    Args:
+        files: Input JSONL files.
+        seed: Seed of the split hash.
+        train_ratio: Share of each language assigned to ``train``.
+        val_ratio: Share of each language assigned to ``validation``.
+        file_limits: Records to read per file (from ``input_file_limits``), so that
+            only the documents that go into the dataset are counted; None reads all.
 
     Raises:
         ValueError: If a document ID present in several languages would land in
@@ -196,15 +316,15 @@ def stratified_cuts(
     shared: dict[str, set[str]] = defaultdict(set)
     for path in files:
         language = language_of(path)
-        with path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                if not line.strip():
-                    raise ValueError(f"{path}:{line_number}: empty line")
-                doc_id = read_document_id(line, f"{path}:{line_number}")
-                positions[language].append(hash_position(doc_id, seed))
-                other = first_language.setdefault(doc_id, language)
-                if other != language:
-                    shared[doc_id].update((other, language))
+        limit = file_limits[str(path)] if file_limits is not None else None
+        for line_number, line in read_lines(path, limit):
+            if not line.strip():
+                raise ValueError(f"{path}:{line_number}: empty line")
+            doc_id = read_document_id(line, f"{path}:{line_number}")
+            positions[language].append(hash_position(doc_id, seed))
+            other = first_language.setdefault(doc_id, language)
+            if other != language:
+                shared[doc_id].update((other, language))
 
     cuts: dict[str, tuple[float, float]] = {}
     for language, values in positions.items():
@@ -288,7 +408,9 @@ def generate_rows(
     train_ratio: float,
     val_ratio: float,
     include_url: bool,
+    file_sources: dict[str, str],
     language_cuts: dict[str, tuple[float, float]] | None = None,
+    file_limits: dict[str, int | None] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Stream validated rows, each tagged with its split, from the input files.
 
@@ -299,8 +421,12 @@ def generate_rows(
         train_ratio: Share of document IDs assigned to ``train``.
         val_ratio: Share of document IDs assigned to ``validation``.
         include_url: Add a ``url`` column (and require a ``url`` field in every record).
+        file_sources: The source name of each file (from ``input_file_sources``), the
+            ``source`` column of its rows.
         language_cuts: Per-language split cuts from ``stratified_cuts``, which replace
             the ratios; None to split every language by the ratios.
+        file_limits: Records to read per file (from ``input_file_limits``): the first
+            ones are used, and a file with fewer is used whole. None reads every file whole.
 
     Raises:
         ValueError: If a record is malformed or a document ID repeats within a language.
@@ -309,61 +435,84 @@ def generate_rows(
     for file_name in files:
         path = Path(file_name)
         language = language_of(path)
-        with path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                where = f"{path}:{line_number}"
-                if not line.strip():
-                    raise ValueError(f"{where}: empty line")
-                record = json.loads(line)
-                doc_id, text = record.get("id"), record.get("text")
-                if not isinstance(doc_id, str) or not doc_id:
-                    raise ValueError(f"{where}: record without a document ID")
-                if not isinstance(text, str):
-                    raise ValueError(f"{where}: record {doc_id!r} has no text field")
-                if not text.strip():
-                    # Pages without content are labelled (usually Bad example) and kept.
-                    LOGGER.warning("%s: document %r has %s; keeping it", where, doc_id,
-                                   "empty text" if not text else "only whitespace as text")
-                if (language, doc_id) in seen:
-                    raise ValueError(f"{where}: duplicate document {doc_id!r} for language {language!r}")
-                seen.add((language, doc_id))
-                row = {"id": doc_id, "language": language}
-                if include_url:
-                    row["url"] = record_url(record, where)
-                yield {
-                    **row,
-                    "text": text,
-                    "labels": label_vector(record, label_names, where),
-                    "split": split_at(
-                        hash_position(doc_id, seed),
-                        language_cuts[language] if language_cuts is not None
-                        else (train_ratio, train_ratio + val_ratio),
-                    ),
-                }
+        source = file_sources[file_name]
+        limit = file_limits[file_name] if file_limits is not None else None
+        rows = 0
+        for line_number, line in read_lines(path, limit):
+            where = f"{path}:{line_number}"
+            if not line.strip():
+                raise ValueError(f"{where}: empty line")
+            record = json.loads(line)
+            doc_id, text = record.get("id"), record.get("text")
+            if not isinstance(doc_id, str) or not doc_id:
+                raise ValueError(f"{where}: record without a document ID")
+            if not isinstance(text, str):
+                raise ValueError(f"{where}: record {doc_id!r} has no text field")
+            if not text.strip():
+                # Pages without content are labelled (usually Bad example) and kept.
+                LOGGER.warning("%s: document %r has %s; keeping it", where, doc_id,
+                               "empty text" if not text else "only whitespace as text")
+            if (language, doc_id) in seen:
+                raise ValueError(f"{where}: duplicate document {doc_id!r} for language {language!r}")
+            seen.add((language, doc_id))
+            row = {"id": doc_id, "language": language, "source": source}
+            if include_url:
+                row["url"] = record_url(record, where)
+            rows += 1
+            yield {
+                **row,
+                "text": text,
+                "labels": label_vector(record, label_names, where),
+                "split": split_at(
+                    hash_position(doc_id, seed),
+                    language_cuts[language] if language_cuts is not None
+                    else (train_ratio, train_ratio + val_ratio),
+                ),
+            }
+        if limit is not None and rows < limit:
+            LOGGER.warning("%s: %d documents, fewer than the limit of %d; using all of them", path, rows, limit)
+        else:
+            LOGGER.info("%s: %d documents (language %s, source %s)", path, rows, language, source)
 
 
 @dataclass
 class SplitStatistics:
-    """Document and label counts of one split, per language.
+    """Document and label counts of one split, per source and language.
+
+    The keys are ``(source, language)`` pairs.
 
     Attributes:
         num_labels: Number of labels.
-        documents: Documents per language.
-        top_label: Per language, the number of documents whose top label is each
-            label (an array in label order).
-        soft: Per language, the summed probability of each label (an array in label
-            order); divided by the documents, it is the label's mean probability.
+        documents: Documents per source and language.
+        top_label: Per source and language, the number of documents whose top label is
+            each label (an array in label order).
+        soft: Per source and language, the summed probability of each label (an array
+            in label order); divided by the documents, it is the label's mean probability.
     """
 
     num_labels: int
-    documents: Counter[str]
-    top_label: dict[str, np.ndarray]
-    soft: dict[str, np.ndarray]
+    documents: Counter[tuple[str, str]]
+    top_label: dict[tuple[str, str], np.ndarray]
+    soft: dict[tuple[str, str], np.ndarray]
 
     @property
     def total(self) -> int:
         """Number of documents in the split."""
         return sum(self.documents.values())
+
+    def documents_per_source(self) -> Counter[str]:
+        """Documents per source, over all languages."""
+        counts: Counter[str] = Counter()
+        for (source, _), count in self.documents.items():
+            counts[source] += count
+        return counts
+
+    def documents_per_language(self) -> Counter[str]:
+        """Documents per language, over all sources."""
+        counts: Counter[str] = Counter()
+        for (_, language), count in self.documents.items():
+            counts[language] += count
+        return counts
 
     def top_label_total(self) -> np.ndarray:
         """Top-label counts over all languages, in label order."""
@@ -375,7 +524,7 @@ class SplitStatistics:
 
 
 def split_statistics(dataset: datasets.Dataset, num_labels: int, batch_size: int = 10_000) -> SplitStatistics:
-    """Count documents, top labels, and summed label probabilities per language.
+    """Count documents, top labels, and summed label probabilities per source and language.
 
     The split is read in batches from its Arrow files, so memory use doesn't grow with
     the dataset. A document's top label is ``argmax`` of its probabilities (the first
@@ -384,38 +533,43 @@ def split_statistics(dataset: datasets.Dataset, num_labels: int, batch_size: int
     Raises:
         ValueError: If a label vector doesn't have ``num_labels`` entries.
     """
-    documents: Counter[str] = Counter()
-    top_label: dict[str, np.ndarray] = defaultdict(lambda: np.zeros(num_labels, dtype=np.int64))
-    soft: dict[str, np.ndarray] = defaultdict(lambda: np.zeros(num_labels, dtype=np.float64))
-    columns = dataset.select_columns(["language", "labels"]).with_format("numpy")
+    documents: Counter[tuple[str, str]] = Counter()
+    top_label: dict[tuple[str, str], np.ndarray] = defaultdict(lambda: np.zeros(num_labels, dtype=np.int64))
+    soft: dict[tuple[str, str], np.ndarray] = defaultdict(lambda: np.zeros(num_labels, dtype=np.float64))
+    columns = dataset.select_columns(["source", "language", "labels"]).with_format("numpy")
     for batch in columns.iter(batch_size=batch_size):
         probabilities = np.asarray(batch["labels"], dtype=np.float64)
         if probabilities.ndim != 2 or probabilities.shape[1] != num_labels:
             raise ValueError(f"Expected label vectors of length {num_labels}, got shape {probabilities.shape}")
+        sources = np.asarray(batch["source"])
         languages = np.asarray(batch["language"])
         top = probabilities.argmax(axis=1)
-        for language in np.unique(languages):
-            mask = languages == language
-            documents[str(language)] += int(mask.sum())
-            top_label[str(language)] += np.bincount(top[mask], minlength=num_labels)
-            soft[str(language)] += probabilities[mask].sum(axis=0)
+        for source in np.unique(sources):
+            source_mask = sources == source
+            for language in np.unique(languages[source_mask]):
+                mask = source_mask & (languages == language)
+                key = (str(source), str(language))
+                documents[key] += int(mask.sum())
+                top_label[key] += np.bincount(top[mask], minlength=num_labels)
+                soft[key] += probabilities[mask].sum(axis=0)
     return SplitStatistics(num_labels, documents, dict(top_label), dict(soft))
 
 
 def write_label_counts(path: Path, statistics: dict[str, SplitStatistics], label_names: Sequence[str]) -> None:
-    """Write the label distribution per split, language, and label as a TSV file.
+    """Write the label distribution per split, source, language, and label as a TSV file.
 
-    Columns: split, language, label, documents (in that split and language),
-    top_label_documents, and probability_sum (the label's soft count).
+    Columns: split, source, language, label, documents (in that split, source, and
+    language), top_label_documents, and probability_sum (the label's soft count).
     """
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-        writer.writerow(["split", "language", "label", "documents", "top_label_documents", "probability_sum"])
+        writer.writerow(["split", "source", "language", "label", "documents", "top_label_documents",
+                         "probability_sum"])
         for split, stats in statistics.items():
-            for language in sorted(stats.documents):
+            for key in sorted(stats.documents):
                 for index, label in enumerate(label_names):
-                    writer.writerow([split, language, label, stats.documents[language],
-                                     int(stats.top_label[language][index]), f"{stats.soft[language][index]:.4f}"])
+                    writer.writerow([split, *key, label, stats.documents[key],
+                                     int(stats.top_label[key][index]), f"{stats.soft[key][index]:.4f}"])
 
 
 def make_readme(
@@ -440,14 +594,19 @@ def make_readme(
     )
     size_rows += f"\n| **Total** | **{all_documents:,}** | 100.0% | |"
 
-    languages = sorted({language for stats in statistics.values() for language in stats.documents})
-    language_rows = "\n".join(
-        f"| {language} | " + " | ".join(f"{statistics[split].documents[language]:,}" for split in SPLITS)
-        + f" | {sum(statistics[split].documents[language] for split in SPLITS):,} |"
-        for language in languages
-    )
-    language_rows += "\n| **Total** | " + " | ".join(f"**{totals[split]:,}**" for split in SPLITS) + \
-        f" | **{all_documents:,}** |"
+    def count_rows(per_split: dict[str, Counter[str]]) -> str:
+        """Table rows of documents per split for each name, with a total row."""
+        names = sorted({name for counts in per_split.values() for name in counts})
+        rows = "\n".join(
+            f"| {name} | " + " | ".join(f"{per_split[split][name]:,}" for split in SPLITS)
+            + f" | {sum(per_split[split][name] for split in SPLITS):,} |"
+            for name in names
+        )
+        return rows + "\n| **Total** | " + " | ".join(f"**{totals[split]:,}**" for split in SPLITS) + \
+            f" | **{all_documents:,}** |"
+
+    source_rows = count_rows({split: statistics[split].documents_per_source() for split in SPLITS})
+    language_rows = count_rows({split: statistics[split].documents_per_language() for split in SPLITS})
 
     top = {split: statistics[split].top_label_total() for split in SPLITS}
     soft_train = statistics["train"].soft_total()
@@ -465,7 +624,13 @@ def make_readme(
         f"**{totals[split]:,}** | {share(totals[split], totals[split])}" for split in SPLITS
     ) + f" | {share(soft_train.sum(), totals['train'])} |"
 
-    input_list = "\n".join(f"- {file}" for file in files)
+    file_limits = input_file_limits(args.input, args.max_per_file)
+    file_sources = input_file_sources(args.input, args.source_names, args.label_type)
+    input_list = "\n".join(
+        f"- {file} (source {file_sources[str(file)]}"
+        + (f", first {file_limits[str(file)]:,} documents at most" if file_limits[str(file)] else "") + ")"
+        for file in files
+    )
     if args.stratify_by_language:
         split_text = (
             f"Stratified by language (`--stratify_by_language`): within each language, the documents\n"
@@ -517,6 +682,14 @@ this order (also in `labels.json`): {", ".join(label_names)}.
 |---|---:|---:|---:|
 {size_rows}
 
+### Documents per source
+
+The `source` column names the input each document came from.
+
+| Source | train | validation | test | Total |
+|---|---:|---:|---:|---:|
+{source_rows}
+
 ### Documents per language
 
 | Language | train | validation | test | Total |
@@ -530,8 +703,8 @@ probability; the first in label order on a tie) is each label. The last column i
 label's **soft share** in the training split: its mean probability over the training
 documents, i.e. its share of the soft targets the classifier is trained on. Where the
 two differ, the LLM was uncertain: the soft share is higher for labels it often gives as
-a second choice, and lower for labels it picks with low confidence. Counts per language
-are in `label_counts.tsv`.
+a second choice, and lower for labels it picks with low confidence. Counts per source and
+language are in `label_counts.tsv`.
 
 | Label | train | % | validation | % | test | % | train soft share |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -570,6 +743,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Leave the URL out of the dataset (no url column), for a text-only classifier. "
         "Records then needn't have a url field.",
     )
+    parser.add_argument(
+        "--max_per_file",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Use at most this many documents (the first ones) from each input file: one value for "
+        "all --input paths or one per path, in the same order. A file with fewer is used whole. "
+        "The files must be in random order, as the HPLT results are.",
+    )
+    parser.add_argument(
+        "--source_names",
+        nargs="+",
+        default=None,
+        help="The source column value of each --input path, one per path in the same order "
+        "(default: the input's directory name, skipping a directory named after the label type).",
+    )
     parser.add_argument("--train_ratio", type=float, default=0.8, help="Ratio of training data.")
     parser.add_argument("--val_ratio", type=float, default=0.1, help="Ratio of validation data.")
     parser.add_argument("--test_ratio", type=float, default=0.1, help="Ratio of test data.")
@@ -585,12 +774,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    """Check the split ratios and the output directory.
+    """Check the split ratios, the per-file limits, the source names, and the output directory.
 
     Raises:
-        ValueError: If the ratios are negative or don't sum to 1.
+        ValueError: If the ratios are negative or don't sum to 1, a per-file limit is
+            not positive or there are neither one nor one per input of them, or the
+            source names are not one per input.
         FileExistsError: If the output directory is not empty and can't be replaced.
     """
+    if args.source_names is not None and len(args.source_names) != len(args.input):
+        raise ValueError(f"--source_names has {len(args.source_names)} names for {len(args.input)} --input paths; "
+                         "give one per path")
+    if args.max_per_file is not None:
+        if any(limit < 1 for limit in args.max_per_file):
+            raise ValueError("--max_per_file values must be positive")
+        if len(args.max_per_file) not in (1, len(args.input)):
+            raise ValueError(
+                f"--max_per_file has {len(args.max_per_file)} values for {len(args.input)} --input paths; "
+                "give one value for all of them or one per path"
+            )
     ratios = (args.train_ratio, args.val_ratio, args.test_ratio)
     if any(ratio < 0 for ratio in ratios):
         raise ValueError("Train, validation, and test ratios must be non-negative")
@@ -617,16 +819,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     labels_path: Path = args.labels_file or DEFAULT_LABELS_DIR / f"{args.label_type}s.yaml"
     label_names, full_names = load_label_names(labels_path)
     files = find_input_files(args.input)
+    file_limits = input_file_limits(args.input, args.max_per_file)
+    file_sources = input_file_sources(args.input, args.source_names, args.label_type)
     for file in files:
-        LOGGER.info("Input %s (language %s)", file, language_of(file))
+        limit = file_limits[str(file)]
+        LOGGER.info("Input %s (language %s, source %s%s)", file, language_of(file), file_sources[str(file)],
+                    f", first {limit} documents" if limit else "")
     LOGGER.info("%d labels from %s", len(label_names), labels_path)
 
     language_cuts = (
-        stratified_cuts(files, args.seed, args.train_ratio, args.val_ratio) if args.stratify_by_language else None
+        stratified_cuts(files, args.seed, args.train_ratio, args.val_ratio, file_limits)
+        if args.stratify_by_language else None
     )
     include_url = not args.no_url
     LOGGER.info("URL column: %s", "yes" if include_url else "no (--no_url)")
-    columns = {"id": datasets.Value("string"), "language": datasets.Value("string")}
+    columns = {
+        "id": datasets.Value("string"),
+        "language": datasets.Value("string"),
+        "source": datasets.Value("string"),
+    }
     if include_url:
         columns["url"] = datasets.Value("string")  # null when the document has no URL
     features = datasets.Features(
@@ -654,7 +865,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "train_ratio": args.train_ratio,
                 "val_ratio": args.val_ratio,
                 "include_url": include_url,
+                "file_sources": file_sources,
                 "language_cuts": language_cuts,
+                "file_limits": file_limits,
             },
         )
         dataset_dict = datasets.DatasetDict(
@@ -676,8 +889,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             else None
         )
         for split in SPLITS:
-            LOGGER.info("%s: %d rows %s", split, len(dataset_dict[split]),
-                        dict(sorted(statistics[split].documents.items())))
+            LOGGER.info("%s: %d rows, per source %s, per language %s", split, len(dataset_dict[split]),
+                        dict(sorted(statistics[split].documents_per_source().items())),
+                        dict(sorted(statistics[split].documents_per_language().items())))
             if missing_urls is not None and missing_urls[split]:
                 LOGGER.warning("%s: %d rows have no URL", split, missing_urls[split])
             if ratios[split] > 0 and not len(dataset_dict[split]):
