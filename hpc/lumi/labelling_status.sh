@@ -29,6 +29,7 @@ module load Local-LAIF lumi-aif-singularity-bindings
 
 base_dir="/scratch/project_462001516/users/tarkkaot/MultilingualWebOrganizer"
 SIF="$base_dir/environments/lumi/vllm.sif"
+workers="$SLURM_CPUS_PER_TASK"
 
 srun singularity run -B /scratch/project_462001516 "$SIF" python \
-    "$base_dir/scripts/data_processing/labelling_status.py" --base-dir "$base_dir" --workers 4 "$@"
+    "$base_dir/scripts/data_processing/labelling_status.py" --base-dir "$base_dir" --workers "$workers" "$@"
