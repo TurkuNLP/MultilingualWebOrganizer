@@ -26,7 +26,7 @@
 # *.jsonl and writes results/datasets/<label type>/<dataset_name> with the columns id,
 # language, source (clean_random, noisy_random or poor_random), url, text and labels.
 # A language's documents from the three collections are split together, every language in
-# exactly 80/10/10 (--stratify_by_language).
+# exactly 94/1/5 (--stratify_by_language and the ratios below).
 # The result files are in the shuffled sample order, so the first N documents of each are
 # a random subset of it.
 
