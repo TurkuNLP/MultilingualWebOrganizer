@@ -86,6 +86,7 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from transformers.trainer_pt_utils import LengthGroupedSampler
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import is_flash_attn_2_available
 from transformers.utils.versions import require_version
@@ -635,6 +636,30 @@ class SoftClassificationTrainer(Trainer):
 
         return (loss, outputs) if return_outputs else loss
 
+    def _get_train_sampler(self, train_dataset: datasets.Dataset | None = None) -> Sampler | None:
+        """Group training batches by length, reading the lengths in one go.
+
+        transformers 5 gives ``LengthGroupedSampler`` ``train_dataset["length"]``, which in
+        datasets 4 is a lazy ``Column`` read row by row on every index. The sampler indexes
+        it once per document at the start of each epoch (and on resume), which for
+        millions of documents kept the GPU idle for over 15 minutes. A plain list gives the
+        same order, as the values and the random permutation are the same.
+
+        Raises:
+            ValueError: If the training set has no length column.
+        """
+        if train_dataset is None:
+            train_dataset = self.train_dataset
+        if self.args.train_sampling_strategy != "group_by_length" or not isinstance(train_dataset, datasets.Dataset):
+            return super()._get_train_sampler(train_dataset)
+        column = self.args.length_column_name
+        if column not in train_dataset.column_names:
+            raise ValueError(f"The training set has no {column!r} column for length grouping")
+        return LengthGroupedSampler(
+            self.args.train_batch_size * self.args.gradient_accumulation_steps,
+            lengths=column_values(train_dataset, column),
+        )
+
     def _get_eval_sampler(self, eval_dataset: datasets.Dataset) -> Sampler | None:
         """Evaluate in dataset order, never length-grouped.
 
@@ -646,6 +671,15 @@ class SoftClassificationTrainer(Trainer):
         if self.args.world_size <= 1:
             return SequentialSampler(eval_dataset)
         return None  # the distributed default, which also keeps dataset order
+
+
+def column_values(dataset: datasets.Dataset, column: str) -> list[Any]:
+    """Return a column as a list in dataset order, read in one Arrow call.
+
+    Much faster than iterating or indexing ``dataset[column]``, a lazy ``Column`` in
+    datasets 4. An indices mapping (from ``select`` or ``shuffle``) is applied.
+    """
+    return dataset.select_columns([column]).with_format("arrow")[:][column].to_pylist()
 
 
 def tokenize_split(
@@ -939,7 +973,7 @@ def main() -> None:
             # Longest first: batches of similar length, and an out-of-memory error shows up at once.
             tokenized[name] = tokenized[name].sort("length", reverse=True)
     for name, dataset in tokenized.items():
-        lengths = np.asarray(dataset["length"])
+        lengths = np.asarray(column_values(dataset, "length"))
         logger.info(
             f"{name}: {len(dataset)} documents, median {np.median(lengths):.0f} tokens, "
             f"{(lengths >= args.max_length).mean():.1%} truncated at {args.max_length}"
