@@ -4,13 +4,16 @@ Code for training multilingual versions of the [WebOrganizer](https://github.com
 
 The code runs on the CSC supercomputers Roihu and LUMI, through SLURM.
 
-## Status (October 2026)
+## Status (12 November 2026)
 
 - **Labelling model chosen: Qwen3.8-27B.** It was compared with four other open models, a decision model built on it (Clef), two OpenAI models and a human annotator. The evidence is in `docs/labelling_model_recommendation.md`.
-- **HPLT 4.0 samples are ready on LUMI** for the OpenEuroLLM languages: 100,000 documents per language from HPLT's clean and noisy collections, and 10,000 from the poor collection. Latvian and Norwegian were since split into Latvian and Latgalian, and Norwegian Bokmål and Nynorsk; these four still need sampling under their new names.
-- **Next: labelling these samples** with Qwen3.8-27B on LUMI.
-- **Proposed wider language set: 128 languages** in `data/qwen_label_languages.txt`, one language code each (Simplified and Traditional Chinese, Serbian Cyrillic and Latin, and Banjar Arabic and Latin are separate languages). These are the OpenEuroLLM languages plus languages on Qwen3's official list or in mmBERT's pre- and mid-training data. They have not been sampled yet.
-- **Classifier training** (`scripts/model_training/`) is implemented but has not been run yet.
+- **HPLT 4.0 labelled in 128 languages.** The languages and their codes are in `data/qwen_label_languages.txt`. Random samples of HPLT's clean, noisy and poor collections were labelled for topic and format on LUMI, and the results copied to Roihu: `results/distribution/Qwen3.8-27B-hplt-annotations/{clean,noisy,poor}_random/{topic,format}/<language>.jsonl`.
+- **Training datasets built:** `results/datasets/{topic,format}/hplt-finetune` (input: URL and text) and `hplt-finetune-nourl` (text only; otherwise identical). Each has 7,288,056 documents: up to 25,000 clean, 25,000 noisy and 10,000 poor documents per language, split 94 / 1 / 5 % per language into train (6,850,772), validation (72,882) and test (364,402). 17 low-resource languages have fewer clean or noisy documents: Magahi, Banjar (Arabic and Latin), Kabuverdianu, Pangasinan, Tok Pisin, Chhattisgarhi, Latgalian, Tibetan, Waray, Awadhi, Ligurian, Balinese, Minangkabau, Sicilian, Silesian and Maithili. Documents and mmBERT tokens per language: `results/statistics/hplt-random.csv` (`count_language_tokens.sh`).
+- **Duplicate check** (`find_duplicates.sh`, results in `results/statistics/duplicates/`): exact duplicates are negligible, and 0.3 % of training documents are near-duplicate copies, concentrated in Traditional Chinese SEO spam, Tibetan, Tok Pisin and Maithili. 0.47 % of validation and test documents are near-duplicates of training documents; leaving them out of the half-epoch validation results changes overall accuracy by at most 0.03 points. The URL models show no sign of memorising URLs that recur across splits.
+- **Now: training four classifiers** (mmBERT-base; topic and format, each with and without the URL) on Roihu, started on 11 November: `results/models/<label type>/<dataset>/mmbert-{topic,format}[-nourl]-1`. Each is one epoch (428,174 steps of 16 documents) with the best settings of the hyperparameter searches (learning rate 3.05e-5, weight decay 0.088, warmup 7.6 %, mean pooling), evaluated and checkpointed 20 times. On 12 November at 13:00 they were 65–73 % through, at about 6–9 steps per second, so each should finish within its first 36-hour job; the chained second job then only repeats the final evaluation and can be cancelled.
+- **Half-epoch results** (step 214,090, validation split; `notebooks/classifier_half_epoch.ipynb`): agreement with Qwen3.8-27B's top label is 86.0 % for topic and 86.5 % for format with the URL, against 83.4 % and 83.2 % without it. The URL helps in every measure, and in no language is the text-only model clearly better. On WebOrganizer's confident-subset measure (the labeller's top label above 75 % probability, the 24 labels both share), format already exceeds WebOrganizer's reported English classifiers (label average 94.4 % vs 91.8 %) and topic is close (92.1 % vs 93.5 %).
+- **Next:** evaluate the final models on the test split without the duplicated documents (a copy of `classifier_half_epoch.ipynb` with `SPLIT = "test"`, `STEP = None`, `EXCLUDE_LEAKED = True`); check against the human annotations whether the URL also helps there, since Qwen3.8-27B labelled with the URL in its prompt; for the next dataset version, split by duplicate cluster so that duplicates cannot cross splits.
+- **First classifiers (October 2026)** were trained on `hplt-v1`: 5,000 documents for each of 36 European languages, 144,145 training documents. On the test split, topic reached accuracy 0.860 (Jensen–Shannon divergence 0.091 bits) and format 0.847 (0.063 bits).
 
 ## How it works
 
@@ -43,11 +46,11 @@ To keep the model from favouring answer positions, the label and example order c
 | `environments/lumi/` | `vllm.sif`, a link to the LUMI AI Factory container the LUMI scripts run in |
 | `notebooks/` | Analyses, saved with their outputs |
 | `docs/` | Reports and annotation guidelines |
-| `data/`, `results/`, `logs/` | Inputs, outputs and job logs (not version-controlled). Language lists: `data/oellm_languages.txt` (the 38 OpenEuroLLM languages), `data/hplt_languages.txt` (all 187 HPLT 4.0 languages) and `data/qwen_label_languages.txt` (the proposed 125) |
+| `data/`, `results/`, `logs/` | Inputs, outputs and job logs (not version-controlled). Language lists: `data/oellm_languages.txt` (the 38 OpenEuroLLM languages), `data/hplt_languages.txt` (all 187 HPLT 4.0 languages) and `data/qwen_label_languages.txt` (the 128 labelled languages, with their codes) |
 
 ## Running on Roihu
 
-Scripts load the `python-vllm/0.19.1` module, which provides Python 3.12, vLLM 0.19.1, torch and transformers 5.8. Submit from `hpc/roihu/` so the relative log paths resolve; logs go to `logs/`.
+Scripts load the `python-vllm/0.19.1` module, which provides Python 3.12, vLLM 0.19.1, torch and transformers 5.8 and runs only on the (ARM) GPU nodes. CPU-only jobs (`find_duplicates.sh`) load `python-data` and run on the (x86) CPU nodes; submit them from a Roihu-CPU login node. Submit from `hpc/roihu/` so the relative log paths resolve; logs go to `logs/`.
 
 ```bash
 cd /scratch/project_2020507/users/tarkkaot/MultilingualWebOrganizer/hpc/roihu
@@ -60,12 +63,18 @@ sbatch array_generate_distribution.sh Qwen/Qwen3.8-27B 2000
 
 # Build a dataset from a labelling run, then train (or search hyperparameters)
 sbatch create_datasets.sh Qwen3.8-27B-hplt-annotations topic hplt-v1
+# or, from the clean, noisy and poor random results copied from LUMI (25,000 / 25,000 / 10,000 per language)
+sbatch create_hplt_dataset.sh topic hplt-finetune
+sbatch create_hplt_dataset.sh topic hplt-finetune-nourl --no_url
+sbatch train_classifier.sh topic hplt-finetune mmbert-topic-1
+sbatch count_language_tokens.sh hplt-random           # documents and mmBERT tokens per language
+sbatch find_duplicates.sh topic/hplt-finetune         # exact and near duplicates within and across splits
 sbatch train_classifier.sh topic hplt-v1 mmbert
-WANDB=online sbatch train_classifier.sh topic hplt-v1 mmbert   # also report to Weights & Biases
+WANDB= sbatch train_classifier.sh topic hplt-v1 mmbert   # without Weights & Biases reporting
 sbatch --array=0-15%4 hp_search_classifier.sh topic hplt-v1 search1
 ```
 
-Reporting to Weights & Biases is off by default. `WANDB=online` (or `offline`, to sync later with `wandb sync`) turns it on for `train_classifier.sh`; run `wandb login` once on a login node first. The header of `train_classifier.sh` has the details.
+`train_classifier.sh` reports to Weights & Biases by default (project `multilingual-weborganizer-finetune`); run `wandb login` once on a login node first. Submit with `WANDB=offline` to sync later with `wandb sync`, or `WANDB=` to turn reporting off. `gpumedium` jobs run for at most 36 hours, and a run resumes from its last checkpoint when resubmitted, so long runs are chained jobs. By default a run is one epoch, evaluated and checkpointed 20 times at even intervals (`EVALUATIONS`); `--num_train_epochs` or `TRAIN_DOCUMENTS` changes the length. The header of `train_classifier.sh` has the details and an example.
 
 Interrupted labelling runs resume from what they have written: resubmit the same command. A labelling job that completes no batch for 20 minutes (`--stall-timeout-minutes`, config `run.stall_timeout_minutes`) exits with code 1 and writes a traceback of where it hung to its `.err` log, instead of holding its GPUs until the time limit. On LUMI, the scripts in `hpc/lumi/` run the same code in a Singularity image; see the next section.
 
@@ -113,7 +122,7 @@ sbatch create_hplt_dataset.sh format hplt-random-v1
 - **More random samples:** by default the sample is the first documents of each file, which can be dominated by a few websites. `--scan-factor N` draws them at random from the first N times as many documents as needed, and `--scan-factor 0` from all of them, at about N times the reading time. Pass a different `--output-dir` (or `--overwrite`) to keep it apart from the existing samples.
 - **Labelling** uses `configs/lumi/distribution/generate_hplt.yaml` and always Qwen/Qwen3.8-27B, with tensor parallelism over the job's GPUs. It reads its languages from `languages_file` in the script, by default the 128 of `data/qwen_label_languages.txt`: task N is language N of the file (topic), task 128 + N its format labels. For the earlier 38-language clean, noisy and poor samples, set it to `data/oellm_languages.txt` and `--array` to `0-75`. Results go to `results/distribution/Qwen3.8-27B-hplt-annotations/<data_quality>/<label type>/<language>.jsonl`.
 - **Speed:** a Maltese test labelled about 0.8–0.9 documents per second on 2 GPUs, so a task covers roughly 25,000 documents in its 8-hour limit. Resubmit a task to continue; it resumes where it stopped.
-- **Datasets** (`create_hplt_dataset.sh`) run `create_datasets.py` on the clean, noisy and poor random results with `--max_per_file 25000 25000 10000`: the first documents of each result file, a random subset because the labelling follows the shuffled sample order. A file with fewer documents is used whole, with a warning in the log. A language's documents from the three collections are split together, 80/10/10 per language (`--stratify_by_language`), into `results/datasets/<label type>/<dataset_name>`. The `source` column (`clean_random`, `noisy_random` or `poor_random`) records the collection, and `finetune.py` reports test metrics per source as well as per language.
+- **Datasets** (`create_hplt_dataset.sh`) run `create_datasets.py` on the clean, noisy and poor random results with `--max_per_file 25000 25000 10000`: the first documents of each result file, a random subset because the labelling follows the shuffled sample order. A file with fewer documents is used whole, with a warning in the log. A language's documents from the three collections are split together, 94/1/5 per language (`--stratify_by_language`; 1 % is still 600 validation documents per language), into `results/datasets/<label type>/<dataset_name>`. The Roihu launcher of the same name does the same. The `source` column (`clean_random`, `noisy_random` or `poor_random`) records the collection, and `finetune.py` reports test metrics per source as well as per language.
 - `array_generate_WO_labels.sh` runs the earlier hard-label pipeline (`generate_multilabel.py`) on the parallel MT-Nemotron-CC documents.
 
 ## Output format
@@ -138,6 +147,8 @@ Records are validated on writing; a run stops with an error instead of saving ma
 | `annotator_agreement.ipynb` | Agreement with the human annotator and the OpenAI models (κ, F1, bootstrap intervals); Clef against Qwen3.8-27B |
 | `prompt_effect.ipynb` | Does our prompt change the labels compared with WebOrganizer's prompt? |
 | `weborganizer_vs_propella.ipynb` | How do WebOrganizer's labels relate to the propella-1 annotations of the same documents? |
+| `classifier_half_epoch.ipynb` | How do the four classifiers (topic and format, with and without the URL) compare at half an epoch: overall, by source, language and label, calibration, against WebOrganizer's reported accuracy, and with duplicates of training documents left out. Reusable for the final models (see its introduction) |
+| `hp_search_results.ipynb` | Which hyperparameters work best? Ranks and plots the classifier searches |
 | `model_comparison.ipynb` | Superseded by `model_selection.ipynb` |
 
 ## Documentation
