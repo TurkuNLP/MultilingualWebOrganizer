@@ -19,7 +19,8 @@ after the label type: ``results/distribution/<run>/clean_random/topic`` is
 The URL is stored unchanged, or as null when the labelling run had none for the
 document. ``finetune.py`` then uses WebOrganizer's ``{url}\\n\\n{text}`` input by
 default. Records written before URLs were stored (no ``url`` key at all) raise an
-error; ``backfill_result_urls.py`` adds them. With ``--no_url`` the dataset has no
+error; ``scripts/data_processing/backfill_result_urls.py`` added them from the input files
+(removed in commit 147b5ea; restore it from git history if needed). With ``--no_url`` the dataset has no
 ``url`` column, the records' URLs are ignored (and may be absent), and ``finetune.py``
 trains on the text alone, like WebOrganizer's ``-NoURL`` classifiers.
 
@@ -390,8 +391,9 @@ def record_url(record: dict[str, Any], where: str) -> str | None:
     """
     if "url" not in record:
         raise ValueError(
-            f"{where}: record without a 'url' field; it predates URL storage, "
-            "add the URLs with scripts/data_processing/backfill_result_urls.py"
+            f"{where}: record without a 'url' field; it predates URL storage. Add the URLs from the "
+            "input file with scripts/data_processing/backfill_result_urls.py, restored from git "
+            "(git show 147b5ea^:scripts/data_processing/backfill_result_urls.py)"
         )
     url = record["url"]
     if url is None:

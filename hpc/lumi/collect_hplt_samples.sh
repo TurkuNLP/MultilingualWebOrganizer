@@ -13,7 +13,7 @@
 # Collect the hplt-sampler runs submitted by submit_hplt_sampler.sh into one sample file
 # per language of data/qwen_label_languages.txt: data/hplt_<collection>_random_sample/
 # <language>.jsonl, 30,000 documents each (all of them for a language with fewer), where
-# reuse_hplt_labels.sh and the labelling script read them.
+# the labelling script reads them.
 # How to run on LUMI (submit from this directory so relative log paths resolve), once the
 # runs of a collection have finished:
 #   cd /scratch/project_462001516/users/tarkkaot/MultilingualWebOrganizer/hpc/lumi

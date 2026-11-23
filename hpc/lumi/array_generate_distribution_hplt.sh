@@ -15,8 +15,7 @@
 # Label the HPLT samples of data/hplt_<data_quality>_sample (made by sample_hplt_by_quality.sh,
 # or collected from hplt-sampler runs for the *_random samples). data_quality is clean_random
 # unless DATA_QUALITY is set when submitting: DATA_QUALITY=noisy_random sbatch ...
-# For the random samples, run reuse_hplt_labels.sh first to reuse earlier labels, and label
-# the whole sample so that it stays a random sample.
+# For the random samples, label the whole sample so that it stays a random sample.
 # with topic and format label distributions from Qwen/Qwen3.8-27B.
 # How to run on LUMI (submit from this directory so relative log paths resolve):
 #   cd /scratch/project_462001516/users/tarkkaot/MultilingualWebOrganizer/hpc/lumi
