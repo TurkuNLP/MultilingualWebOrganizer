@@ -24,6 +24,15 @@ Every row is checked: 24 finite, non-negative probabilities summing to 1, the la
 ``top_choice_index``, and the same label name (first line of ``top_choice``) for every use of
 an index. Anything else raises an error.
 
+With ``--qwen_labels_dir``, ``labels`` is instead our labeller's distribution over all 26 labels,
+read from ``<qwen_labels_dir>/<split>.jsonl`` (records written by
+``generate_label_distributions.py`` for the same split, e.g. by
+``hpc/roihu/array_label_weborganizer_eval.sh``), and ``source`` is ``weborganizer_qwen``. Every
+document of a split must have exactly one record, with the same text and URL and rotated prompt
+order, and the file must hold no other documents; otherwise the script raises an error. Llama's
+distribution is still checked, and the log reports how often the two labellers' top labels
+(over WebOrganizer's 24) agree.
+
 Example (on Roihu, where the module has ``datasets``):
     python scripts/data_processing/create_weborganizer_eval_dataset.py --label_type topic \\
         --output_dir results/datasets/topic/weborganizer-405B
@@ -66,8 +75,11 @@ WEBORGANIZER_LABELS = {
 }
 EXTRA_LABELS = ["Other", "Bad example"]
 SOURCE = "weborganizer_405b"
+QWEN_SOURCE = "weborganizer_qwen"
 LANGUAGE = "english"
 PROBABILITY_TOLERANCE = 1e-4
+# Our labeller's records are validated to this tolerance when written (distribution_records.py).
+QWEN_PROBABILITY_TOLERANCE = 1e-3
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -92,6 +104,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Dataset whose labels.json gives the label order (default: results/datasets/<label_type>/hplt-finetune "
         "next to --output_dir)",
+    )
+    parser.add_argument(
+        "--qwen_labels_dir",
+        type=Path,
+        default=None,
+        help="Use our labeller's 26-label distributions from <dir>/<split>.jsonl as targets instead of Llama's",
     )
     parser.add_argument("--hf_dataset", default=None, help="Hugging Face dataset (default: by --label_type)")
     parser.add_argument("--cache_dir", default=None, help="Hugging Face datasets cache directory")
@@ -127,7 +145,15 @@ def record_id(metadata: dict[str, Any]) -> str:
     Raises:
         ValueError: If the record ID is missing or not in that form.
     """
-    raw = metadata.get("WARC-Record-ID")
+    return bare_uuid(metadata.get("WARC-Record-ID"))
+
+
+def bare_uuid(raw: Any) -> str:
+    """Strip ``<urn:uuid:`` and ``>`` from a WARC record ID.
+
+    Raises:
+        ValueError: If the ID is not a string in that form.
+    """
     prefix, suffix = "<urn:uuid:", ">"
     if not isinstance(raw, str) or not raw.startswith(prefix) or not raw.endswith(suffix):
         raise ValueError(f"Unexpected WARC-Record-ID {raw!r}")
@@ -161,8 +187,56 @@ def checked_probabilities(row: dict[str, Any], where: str) -> list[float]:
     return [p / total for p in probs]
 
 
+def read_qwen_records(path: Path, label_names: Sequence[str]) -> dict[str, dict[str, Any]]:
+    """Read our labeller's records for one split, keyed by bare WARC UUID.
+
+    Args:
+        path: JSONL file written by ``generate_label_distributions.py``.
+        label_names: Label short names in dataset order (the keys of ``label_probs``).
+
+    Returns:
+        Per document: ``text``, ``url`` and ``labels`` (probabilities in ``label_names`` order,
+        renormalised to sum to exactly 1).
+
+    Raises:
+        FileNotFoundError: If the file is missing.
+        ValueError: On a malformed record, a duplicate ID, a non-rotated prompt order, or labels
+            that don't match ``label_names``.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"{path}: no labeller records for this split")
+    records: dict[str, dict[str, Any]] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            where = f"{path}:{line_number}"
+            record = json.loads(line)
+            doc_id = bare_uuid(record.get("id"))
+            if doc_id in records:
+                raise ValueError(f"{where}: document {doc_id} occurs more than once")
+            if record.get("prompt_order") != "rotated":
+                raise ValueError(f"{where}: prompt_order {record.get('prompt_order')!r}; the training labels used 'rotated'")
+            probs = record.get("label_probs")
+            if not isinstance(probs, dict) or set(probs) != set(label_names):
+                raise ValueError(f"{where}: label_probs keys {sorted(probs or {})} don't match {list(label_names)}")
+            vector = [probs[name] for name in label_names]
+            if not all(isinstance(p, (int, float)) and not isinstance(p, bool) and math.isfinite(p) and p >= 0 for p in vector):
+                raise ValueError(f"{where}: probabilities must be finite and non-negative: {vector}")
+            total = math.fsum(vector)
+            if abs(total - 1) > QWEN_PROBABILITY_TOLERANCE:
+                raise ValueError(f"{where}: probabilities sum to {total}")
+            records[doc_id] = {"text": record.get("text"), "url": record.get("url"), "labels": [p / total for p in vector]}
+    LOGGER.info("%s: %d labeller records", path, len(records))
+    return records
+
+
 def generate_rows(
-    hf_dataset: str, split: str, cache_dir: str | None, include_url: bool, choice_names: dict[int, str]
+    hf_dataset: str,
+    split: str,
+    cache_dir: str | None,
+    include_url: bool,
+    choice_names: dict[int, str],
+    qwen_records: dict[str, dict[str, Any]] | None = None,
+    agreement: Counter | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield the dataset rows of one WebOrganizer split.
 
@@ -173,12 +247,18 @@ def generate_rows(
         include_url: Include the url column.
         choice_names: Filled with label index -> first line of ``top_choice``, shared across splits,
             to check that an index always means the same label.
+        qwen_records: Our labeller's records for this split (from ``read_qwen_records``); if
+            given, they are the targets, and each is removed once used, so that the caller can
+            check that none is left over.
+        agreement: With ``qwen_records``, counts documents (``"documents"``) and those whose top
+            label over WebOrganizer's 24 labels is the same for both labellers (``"same_top"``).
 
     Yields:
         Rows with id, language, source, (url,) text and labels.
 
     Raises:
-        ValueError: On a malformed row, a missing URL or text, or an inconsistent label name.
+        ValueError: On a malformed row, a missing URL or text, an inconsistent label name, or a
+            document without a matching labeller record.
     """
     source = datasets.load_dataset(hf_dataset, split=split, cache_dir=cache_dir)
     LOGGER.info("%s %s: %d rows", hf_dataset, split, len(source))
@@ -192,28 +272,72 @@ def generate_rows(
         text = row["text"]
         if not isinstance(text, str) or not text.strip():
             raise ValueError(f"{where}: empty text")
-        out = {"id": record_id(row["metadata"]), "language": LANGUAGE, "source": SOURCE}
+        doc_id = record_id(row["metadata"])
+        labels = probs + [0.0] * len(EXTRA_LABELS)
+        if qwen_records is not None:
+            qwen = qwen_records.pop(doc_id, None)
+            if qwen is None:
+                raise ValueError(f"{where}: document {doc_id} has no labeller record")
+            if qwen["text"] != text:
+                raise ValueError(f"{where}: the labeller record of {doc_id} has different text")
+            if qwen["url"] != row["url"]:
+                raise ValueError(f"{where}: the labeller saw URL {qwen['url']!r}, the dataset has {row['url']!r}")
+            labels = qwen["labels"]
+            if agreement is not None:
+                agreement["documents"] += 1
+                qwen_top = max(range(24), key=labels.__getitem__)
+                agreement["same_top"] += qwen_top == row["top_choice_index"]
+        out = {"id": doc_id, "language": LANGUAGE, "source": SOURCE if qwen_records is None else QWEN_SOURCE}
         if include_url:
             if not isinstance(row["url"], str) or not row["url"]:
                 raise ValueError(f"{where}: no URL")
             out["url"] = row["url"]
         out["text"] = text
-        out["labels"] = probs + [0.0] * len(EXTRA_LABELS)
+        out["labels"] = labels
         yield out
 
 
-def make_readme(args: argparse.Namespace, hf_dataset: str, sizes: dict[str, int], top_counts: dict[str, Counter]) -> str:
+def make_readme(
+    args: argparse.Namespace,
+    hf_dataset: str,
+    sizes: dict[str, int],
+    top_counts: dict[str, Counter],
+    label_names: Sequence[str],
+    agreement: dict[str, Counter],
+) -> str:
     """Describe how the dataset was made.
 
     Args:
         args: Parsed arguments.
         hf_dataset: Source Hugging Face dataset.
         sizes: Rows per split.
-        top_counts: Per split, documents per Llama top label.
+        top_counts: Per split, documents per target top label.
+        label_names: Labels to list in the top-label table.
+        agreement: Per split, the labeller agreement counts from ``generate_rows`` (empty without
+            ``--qwen_labels_dir``).
 
     Returns:
         README text in Markdown.
     """
+    if args.qwen_labels_dir is None:
+        targets = [
+            "- `labels`: Llama's distribution over WebOrganizer's 24 labels (`choice_probs`), then 0 for "
+            "*Other* and *Bad example*; label order in `labels.json`.",
+            f"- `id`: WARC record UUID; `language`: {LANGUAGE}; `source`: {SOURCE}.",
+        ]
+        labeller = "Llama"
+    else:
+        targets = [
+            "- `labels`: our labeller's distribution over all 26 labels, from "
+            f"`{args.qwen_labels_dir}/<split>.jsonl` (not Llama's); label order in `labels.json`.",
+            f"- `id`: WARC record UUID; `language`: {LANGUAGE}; `source`: {QWEN_SOURCE}.",
+            "- Same top label as Llama, over WebOrganizer's 24 labels: "
+            + ", ".join(
+                f"{split} {counts['same_top'] / counts['documents']:.1%}" for split, counts in agreement.items()
+            )
+            + ".",
+        ]
+        labeller = "our labeller's"
     lines = [
         "# WebOrganizer evaluation dataset",
         "",
@@ -222,20 +346,18 @@ def make_readme(args: argparse.Namespace, hf_dataset: str, sizes: dict[str, int]
         "annotations of English web pages, WebOrganizer's own classifier training and evaluation data).",
         "",
         f"- Label type: {args.label_type}; input: {'text only (no url column)' if args.no_url else 'URL and text'}",
-        "- `labels`: Llama's distribution over WebOrganizer's 24 labels (`choice_probs`), then 0 for "
-        "*Other* and *Bad example*; label order in `labels.json`.",
-        f"- `id`: WARC record UUID; `language`: {LANGUAGE}; `source`: {SOURCE}.",
+        *targets,
         "",
         "| Split | Documents |",
         "|---|---:|",
         *[f"| {split} | {count:,} |" for split, count in sizes.items()],
         "",
-        "Documents per Llama top label:",
+        f"Documents per {labeller} top label:",
         "",
         "| Label | " + " | ".join(sizes) + " |",
         "|---|" + "---:|" * len(sizes),
     ]
-    for label in WEBORGANIZER_LABELS[args.label_type]:
+    for label in label_names:
         lines.append(f"| {label} | " + " | ".join(f"{top_counts[split][label]:,}" for split in sizes) + " |")
     return "\n".join(lines) + "\n"
 
@@ -270,8 +392,30 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     choice_names: dict[int, str] = {}
     splits = {}
+    agreement: dict[str, Counter] = {}
     for split in args.splits:
-        rows = list(generate_rows(hf_dataset, split, args.cache_dir, not args.no_url, choice_names))
+        qwen_records = None
+        if args.qwen_labels_dir is not None:
+            qwen_records = read_qwen_records(args.qwen_labels_dir / f"{split}.jsonl", label_info["label_names"])
+            agreement[split] = Counter()
+        rows = list(
+            generate_rows(
+                hf_dataset, split, args.cache_dir, not args.no_url, choice_names, qwen_records, agreement.get(split)
+            )
+        )
+        if qwen_records:
+            raise ValueError(
+                f"{len(qwen_records)} labeller records for {split} are not in {hf_dataset}, e.g. {list(qwen_records)[:5]}"
+            )
+        if split in agreement:
+            counts = agreement[split]
+            LOGGER.info(
+                "%s: same top label as Llama (over WebOrganizer's 24) for %d of %d documents (%.1f%%)",
+                split,
+                counts["same_top"],
+                counts["documents"],
+                100 * counts["same_top"] / counts["documents"],
+            )
         splits[split] = datasets.Dataset.from_list(rows, features=features)
     all_ids = [doc_id for split in splits.values() for doc_id in split["id"]]
     duplicates = [doc_id for doc_id, count in Counter(all_ids).items() if count > 1]
@@ -282,8 +426,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     LOGGER.info("Label index -> classifier label -> name in Llama's prompt (check that they match):")
     for index in sorted(choice_names):
         LOGGER.info("  %2d %-20s %s", index, names[index], choice_names[index])
+    # Top labels over all labels: Llama's targets have 0 for the two extra labels, so their
+    # top label is always one of the 24.
+    label_names = label_info["label_names"]
     top_counts = {
-        split: Counter(names[max(range(24), key=row.__getitem__)] for row in dataset["labels"])
+        split: Counter(label_names[max(range(len(row)), key=row.__getitem__)] for row in dataset["labels"])
         for split, dataset in splits.items()
     }
 
@@ -292,7 +439,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     datasets.DatasetDict(splits).save_to_disk(str(args.output_dir))
     (args.output_dir / "labels.json").write_text(json.dumps(label_info, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     sizes = {split: len(dataset) for split, dataset in splits.items()}
-    (args.output_dir / "README.md").write_text(make_readme(args, hf_dataset, sizes, top_counts), encoding="utf-8")
+    readme_labels = label_names if args.qwen_labels_dir is not None else names
+    (args.output_dir / "README.md").write_text(
+        make_readme(args, hf_dataset, sizes, top_counts, readme_labels, agreement), encoding="utf-8"
+    )
     LOGGER.info("Saved %s to %s", sizes, args.output_dir)
 
 
