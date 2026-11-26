@@ -100,6 +100,8 @@ def record_batches(path: Path) -> Iterator[pa.RecordBatch]:
 def top_labels(labels: pa.Array, names: list[str]) -> tuple[list[dict[str, Any]], np.ndarray]:
     """Rank each document's two most probable labels.
 
+    Ties go to the label that comes first in ``names``.
+
     Args:
         labels: Fixed-size list array of label probabilities, one row per document.
         names: Label names in column order.
@@ -112,7 +114,9 @@ def top_labels(labels: pa.Array, names: list[str]) -> tuple[list[dict[str, Any]]
     probs = labels.flatten().to_numpy(zero_copy_only=False).reshape(-1, width)
     if probs.shape[0] != len(labels):
         raise ValueError(f"Expected {len(labels)} rows of {width} label probabilities, got {probs.shape}")
-    order = np.argsort(-probs, axis=1)[:, :2]
+    # A stable sort breaks ties in favour of the earlier label, like argmax in create_datasets.py, so the
+    # top labels agree with label_counts.tsv (exact ties do occur, e.g. Other vs Religion).
+    order = np.argsort(-probs, axis=1, kind="stable")[:, :2]
     ranked = [
         {
             "top": names[first],
