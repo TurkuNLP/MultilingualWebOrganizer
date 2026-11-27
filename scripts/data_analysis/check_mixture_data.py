@@ -26,6 +26,7 @@ import argparse
 import json
 import logging
 import struct
+import time
 from array import array
 from collections import defaultdict
 from collections.abc import Sequence
@@ -104,7 +105,12 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     tokens: dict[tuple[str, str], int] = defaultdict(int)
     documents = 0
-    for index_file in index_files:
+    start = time.monotonic()
+    for file_number, index_file in enumerate(index_files, start=1):
+        if file_number % 10 == 1:
+            # Progress, to tell slow reading from the file system apart from a stuck job.
+            LOGGER.info("File %d/%d (%s), %d documents so far, %.0f s", file_number,
+                        len(index_files), index_file.name, documents, time.monotonic() - start)
         name = index_file.name[:-len(SUFFIX)]
         labels_file = args.selection_dir / f"{name}.labels.tsv"
         lengths = sequence_lengths(index_file)
